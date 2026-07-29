@@ -50,6 +50,7 @@ function App() {
             <button id="saveProjectBtn">💾 Save Project</button>
             <button id="loadProjectBtn">📂 Load Project</button>
             <button id="listProjectsBtn">📋 List Projects</button>
+            <button id="shareProjectBtn">🤝 Share Project</button>
             <select id="projectSelect" style={{ display: 'none' }}>
               <option>-- Select Project --</option>
             </select>
@@ -134,10 +135,17 @@ function App() {
                   </tr>
                 </thead>
                 <tbody>
-                  <tr>
+                  <tr data-leg-seq="1">
                     <td>1</td>
                     <td><input type="text" className="distance-input" placeholder="203.5" /></td>
-                    <td><input type="text" className="bearing-input" placeholder="321530" maxLength={6} /></td>
+                    <td>
+                      <span className="bearing-group">
+                        <input type="text" className="bearing-deg" placeholder="0-360" maxLength={3} inputMode="numeric" />°
+                        <input type="text" className="bearing-min" placeholder="MM" maxLength={2} inputMode="numeric" />'
+                        <input type="text" className="bearing-sec" placeholder="SS" maxLength={2} inputMode="numeric" />"
+                      </span>
+                      <input type="hidden" className="bearing-input" defaultValue="" />
+                    </td>
                     <td>
                       <button className="edit-btn" onClick={(e) => window.chainSurvey.editLeg(e.currentTarget)}>✏️</button>
                       <button className="delete-btn" onClick={(e) => window.chainSurvey.deleteLeg(e.currentTarget)}>🗑️</button>

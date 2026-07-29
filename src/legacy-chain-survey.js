@@ -1,3 +1,8 @@
+import { auth, db } from './firebase.js';
+import {
+    collection, doc, setDoc, getDoc, getDocs, query, where, updateDoc, arrayUnion
+} from 'firebase/firestore';
+
 export class ChainSurveyConverter {
     constructor() {
         this.map = null;
@@ -14,6 +19,7 @@ export class ChainSurveyConverter {
         this.gcpClickMode = false;
         this.gcpClickCount = 0;
         this.firstGCPClickPoint = null;
+        this.legSeqCounter = 1; // the static first row in the HTML is always leg #1
         
         this.conversionFactors = {
             links: 0.201168,
@@ -26,26 +32,105 @@ export class ChainSurveyConverter {
     }
 
     init() {
+        // proj4 only knows generic WGS84 (plain lat/long) out of the box -
+        // UTM Zone 43N is a specific real-world projection that has to be
+        // defined explicitly before it can be used for conversions.
+        if (typeof proj4 !== 'undefined') {
+            proj4.defs('EPSG:32643', '+proj=utm +zone=43 +datum=WGS84 +units=m +no_defs');
+        }
         this.initMap();
         this.bindEvents();
         this.addInitialRow();
+        this.updateDistancePlaceholders();
+        this.applyRolePermissions();
         this.showMessage('Application loaded successfully!', 'success');
     }
 
-    initMap() {
-        this.map = L.map('mapContainer', {
-            center: [0, 0],
-            zoom: 16,
-            crs: L.CRS.Simple,
-            layers: []
-        });
+    // A Viewer can open and look at anything shared with them, but
+    // shouldn't be able to overwrite a project - so the Save button
+    // gets disabled for that role specifically.
+    applyRolePermissions() {
+        const role = window.currentUserRole;
+        const saveBtn = document.getElementById('saveProjectBtn');
+        if (role === 'viewer') {
+            saveBtn.disabled = true;
+            saveBtn.title = 'Viewers cannot save changes';
+        } else {
+            saveBtn.disabled = false;
+            saveBtn.title = '';
+        }
+    }
 
+    getSelectedCRS() {
+        const el = document.getElementById('crsSelect');
+        return el ? el.value : 'local';
+    }
+
+    // Converts a real latitude/longitude into this app's local working
+    // X/Y, based on whichever coordinate system is currently selected.
+    // Returns null if the selected system has no real-world conversion
+    // available yet.
+    latLngToLocalXY(lat, lng) {
+        const crs = this.getSelectedCRS();
+        if (crs === 'utm43n' && typeof proj4 !== 'undefined') {
+            const [x, y] = proj4('EPSG:4326', 'EPSG:32643', [lng, lat]); // proj4 takes [lng, lat]
+            return { x, y };
+        }
+        if (crs === 'geographic') {
+            // Degrees used directly as the working plane. Note: this
+            // doesn't mix meaningfully with meter-based leg distances -
+            // it's here mainly so imported lat/long isn't silently lost.
+            return { x: lng, y: lat };
+        }
+        return null; // 'local' and 'custom' have no real-world conversion yet
+    }
+
+    // The reverse: local working X/Y back into a real latitude/longitude,
+    // for showing points correctly on a real-world map layer.
+    localXYToLatLng(x, y) {
+        const crs = this.getSelectedCRS();
+        if (crs === 'utm43n' && typeof proj4 !== 'undefined') {
+            const [lng, lat] = proj4('EPSG:32643', 'EPSG:4326', [x, y]);
+            return { lat, lng };
+        }
+        if (crs === 'geographic') {
+            return { lat: y, lng: x };
+        }
+        return null;
+    }
+
+    // Same precedence the map uses: an explicit lat/long (from a GCP
+    // transform or an imported anchor) wins; otherwise derive it from
+    // the selected coordinate system if possible. Returns null if no
+    // real-world position can be determined at all - callers should
+    // treat that as "can't export this in a real-world format," not
+    // silently fall back to local meters.
+    getExportLatLng(coord) {
+        if (coord.latitude != null && coord.longitude != null && !isNaN(coord.latitude) && !isNaN(coord.longitude)) {
+            return { lat: coord.latitude, lng: coord.longitude };
+        }
+        return this.localXYToLatLng(coord.x, coord.y);
+    }
+
+    initMap() {
+        this.createMapInstance(L.CRS.Simple, [0, 0], 16);
         this.setupMapLayers();
         this.addCoordinateGrid();
-        
         this.plotLayer = L.layerGroup().addTo(this.map);
+        this.attachMapClickHandler();
+    }
 
-        // Map click event for editing points
+    // Leaflet's coordinate system (CRS) is fixed when a map is created -
+    // there's no supported way to change it on a live instance. Simple
+    // Plot mode needs CRS.Simple (treats local meters as flat pixels);
+    // real map layers (OSM/Satellite/Terrain) need the standard
+    // CRS.EPSG3857 that real tile servers use. Crossing between the two
+    // means the whole map instance has to be torn down and rebuilt.
+    createMapInstance(crs, center, zoom) {
+        this.map = L.map('mapContainer', { center, zoom, crs, layers: [] });
+    }
+
+    attachMapClickHandler() {
         this.map.on('click', (e) => {
             if (this.editPointMode) {
                 this.handleMapClickForPointEdit(e);
@@ -55,22 +140,33 @@ export class ChainSurveyConverter {
         });
     }
 
-    handleMapClickForPointEdit(e) {
-        const latlng = e.latlng;
-        
-        // Find closest point to click
+    // Finds whichever plotted point is closest to a map click, measured
+    // in actual screen pixels - this works correctly no matter which map
+    // layer is active (Simple Plot's local meters, or OSM/Satellite's
+    // real lat/lng), unlike comparing the raw coordinate values directly.
+    findClosestPlottedPointToClick(clickLatLng) {
+        const clickPixel = this.map.latLngToContainerPoint(clickLatLng);
         let closest = null;
-        let minDist = Infinity;
-        
+        let minPixelDist = Infinity;
+
         this.coordinates.forEach((coord, idx) => {
-            const dist = Math.sqrt(Math.pow(latlng.lat - coord.x, 2) + Math.pow(latlng.lng - coord.y, 2));
-            if (dist < minDist) {
-                minDist = dist;
+            const pos = this.getPlotPosition(coord);
+            if (!pos) return;
+            const pointPixel = this.map.latLngToContainerPoint(pos);
+            const dist = clickPixel.distanceTo(pointPixel);
+            if (dist < minPixelDist) {
+                minPixelDist = dist;
                 closest = idx;
             }
         });
 
-        if (closest !== null && minDist < 50) {
+        return { closest, minPixelDist };
+    }
+
+    handleMapClickForPointEdit(e) {
+        const { closest, minPixelDist } = this.findClosestPlottedPointToClick(e.latlng);
+
+        if (closest !== null && minPixelDist < 40) {
             this.editCoordinates(closest);
         } else {
             this.showMessage('No point near click. Click closer to a point.', 'error');
@@ -78,21 +174,9 @@ export class ChainSurveyConverter {
     }
 
     handleMapClickForGCPAdd(e) {
-        const latlng = e.latlng;
-        
-        // Find closest point to click
-        let closest = null;
-        let minDist = Infinity;
-        
-        this.coordinates.forEach((coord, idx) => {
-            const dist = Math.sqrt(Math.pow(latlng.lat - coord.x, 2) + Math.pow(latlng.lng - coord.y, 2));
-            if (dist < minDist) {
-                minDist = dist;
-                closest = idx;
-            }
-        });
+        const { closest, minPixelDist } = this.findClosestPlottedPointToClick(e.latlng);
 
-        if (closest !== null && minDist < 50) {
+        if (closest !== null && minPixelDist < 40) {
             if (this.gcpClickCount === 0) {
                 this.firstGCPClickPoint = this.coordinates[closest];
                 this.gcpClickCount++;
@@ -192,6 +276,7 @@ export class ChainSurveyConverter {
         document.getElementById('saveProjectBtn').addEventListener('click', () => this.saveProject());
         document.getElementById('loadProjectBtn').addEventListener('click', () => this.loadProject());
         document.getElementById('listProjectsBtn').addEventListener('click', () => this.listProjects());
+        document.getElementById('shareProjectBtn').addEventListener('click', () => this.shareProject());
         document.getElementById('projectSelect').addEventListener('change', (e) => this.selectProjectToLoad(e.target.value));
 
         // Import/Export events
@@ -240,6 +325,13 @@ export class ChainSurveyConverter {
         document.getElementById('crsSelect').addEventListener('change', (e) => {
             const customDiv = document.getElementById('customCRS');
             customDiv.style.display = e.target.value === 'custom' ? 'block' : 'none';
+
+            // Any imported anchor points, and any UTM-derived positions,
+            // depend on which coordinate system is selected - recompute
+            // everything now instead of showing stale positions.
+            if (this.coordinates.length > 0) {
+                this.calculatePlot();
+            }
         });
 
         // Live preview on data entry
@@ -250,11 +342,80 @@ export class ChainSurveyConverter {
             }
         });
 
-        // Bearing input formatting
+        // Live georeferencing: as soon as 4+ GCPs have valid values, keep
+        // recalculating automatically on every edit - clicking the button
+        // is no longer required (it's still there as an explicit action
+        // that also shows a confirmation message).
         document.addEventListener('input', (e) => {
-            if (e.target.classList.contains('bearing-input')) {
-                this.formatBearingInput(e.target);
+            if (e.target.classList.contains('gcp-survey-x') ||
+                e.target.classList.contains('gcp-survey-y') ||
+                e.target.classList.contains('gcp-real-lat') ||
+                e.target.classList.contains('gcp-real-lng')) {
+                clearTimeout(this.gcpAutoCalcTimer);
+                this.gcpAutoCalcTimer = setTimeout(() => {
+                    this.calculateGeoreference(true); // silent = no toast spam while typing
+                }, 400);
             }
+        });
+
+        // Bearing boxes: digits only, and keep the hidden combined field
+        // in sync with whatever fields the current format shows
+        document.addEventListener('input', (e) => {
+            const isDigitBearingBox =
+                e.target.classList.contains('bearing-deg') ||
+                e.target.classList.contains('bearing-min') ||
+                e.target.classList.contains('bearing-sec') ||
+                e.target.classList.contains('bearing-deg-q') ||
+                e.target.classList.contains('bearing-min-q');
+
+            if (isDigitBearingBox) {
+                e.target.value = e.target.value.replace(/[^\d]/g, '');
+            }
+
+            if (isDigitBearingBox || e.target.classList.contains('bearing-decimal')) {
+                const row = e.target.closest('tr');
+                if (row) {
+                    this.syncBearingHiddenField(row);
+                    this.updateLivePreview();
+                }
+            }
+        });
+
+        // Quadrant N/S and E/W dropdowns
+        document.addEventListener('change', (e) => {
+            if (e.target.classList.contains('bearing-ns') || e.target.classList.contains('bearing-ew')) {
+                const row = e.target.closest('tr');
+                if (row) {
+                    this.syncBearingHiddenField(row);
+                    this.updateLivePreview();
+                }
+            }
+        });
+
+        // Switching Bearing Format rebuilds every row's bearing cell to
+        // match, carrying over each row's existing value.
+        document.getElementById('bearingFormat').addEventListener('change', () => {
+            this.rebuildAllBearingCells();
+        });
+
+        // Switching Distance Unit updates the example placeholder shown
+        // in every distance box, so it's clear which unit is expected.
+        document.getElementById('distanceUnit').addEventListener('change', () => {
+            this.updateDistancePlaceholders();
+        });
+    }
+
+    updateDistancePlaceholders() {
+        const examples = {
+            links: '203.5',
+            chains: '10.2',
+            feet: '667',
+            meters: '203.5'
+        };
+        const unit = document.getElementById('distanceUnit').value;
+        const example = examples[unit] || '203.5';
+        document.querySelectorAll('.distance-input').forEach(input => {
+            input.placeholder = `${example} (${unit})`;
         });
     }
 
@@ -274,6 +435,12 @@ export class ChainSurveyConverter {
             showBtn.style.display = 'none';
             hideBtn.style.display = 'block';
         }
+
+        // Leaflet caches the map's pixel size and has no way to know the
+        // container just resized - the panel's CSS transition takes
+        // 300ms, so wait for it to finish before telling Leaflet to
+        // recheck, or it'll measure the size mid-animation.
+        setTimeout(() => this.map.invalidateSize(), 320);
     }
 
     toggleBottomPanel() {
@@ -287,6 +454,8 @@ export class ChainSurveyConverter {
         } else {
             hideBtn.textContent = '▼';
         }
+
+        setTimeout(() => this.map.invalidateSize(), 320);
     }
 
     toggleEditPointMode() {
@@ -381,6 +550,21 @@ export class ChainSurveyConverter {
 
         bearingStr = bearingStr.trim();
 
+        // Quadrant format, e.g. "N 32°15' E" or "S45°30'W"
+        const quadMatch = bearingStr.match(/^([NS])\s*(\d+)[°d]?\s*(\d*)['\u2032]?\s*([EW])$/i);
+        if (quadMatch) {
+            const azimuth = this.quadrantToAzimuth(
+                quadMatch[1].toUpperCase(),
+                parseInt(quadMatch[2]) || 0,
+                parseInt(quadMatch[3]) || 0,
+                quadMatch[4].toUpperCase()
+            );
+            const degrees = Math.floor(azimuth);
+            const minutes = Math.floor((azimuth - degrees) * 60);
+            const seconds = Math.round(((azimuth - degrees) * 60 - minutes) * 60);
+            return { degrees, minutes, seconds };
+        }
+
         const dmsMatch = bearingStr.match(/(\d+)[°d](\d*)['\']?(\d*)[\""]?/i);
         if (dmsMatch) {
             return {
@@ -410,22 +594,182 @@ export class ChainSurveyConverter {
         return `${degrees}°${minutes}'${seconds}"`;
     }
 
+    // Which bearing input style is currently selected in the dropdown.
+    getBearingFormatMode() {
+        const el = document.getElementById('bearingFormat');
+        return el ? el.value : 'dms';
+    }
+
+    // Converts a quadrant bearing (e.g. N 32°15' E) into a standard
+    // 0-360 azimuth in decimal degrees.
+    quadrantToAzimuth(ns, degrees, minutes, ew) {
+        const dm = degrees + minutes / 60;
+        if (ns === 'N' && ew === 'E') return dm;
+        if (ns === 'S' && ew === 'E') return 180 - dm;
+        if (ns === 'S' && ew === 'W') return 180 + dm;
+        return 360 - dm; // N...W
+    }
+
+    // The reverse: turns a 0-360 azimuth into quadrant notation parts.
+    azimuthToQuadrant(azimuth) {
+        let ns, ew, dm;
+        if (azimuth <= 90) { ns = 'N'; ew = 'E'; dm = azimuth; }
+        else if (azimuth <= 180) { ns = 'S'; ew = 'E'; dm = 180 - azimuth; }
+        else if (azimuth <= 270) { ns = 'S'; ew = 'W'; dm = azimuth - 180; }
+        else { ns = 'N'; ew = 'W'; dm = 360 - azimuth; }
+        const degrees = Math.floor(dm);
+        const minutes = Math.round((dm - degrees) * 60);
+        return { ns, degrees, minutes, ew };
+    }
+
+    // Builds the bearing cell's HTML in whichever style is currently
+    // selected. Whatever style is shown, the hidden ".bearing-input"
+    // field always ends up holding a plain decimal string or a normal
+    // "32°15'30"" string - so calculatePlot, save/load, import/export,
+    // and the edit modal never need to know which style was used.
+    // Bearing text legitimately contains a literal " character (the
+    // arcseconds mark, e.g. 32°15'30"). Inserting that raw into an HTML
+    // value="..." attribute closes the attribute early and corrupts the
+    // whole row's markup. This makes it safe to insert.
+    escapeHtmlAttr(str) {
+        return String(str)
+            .replace(/&/g, '&amp;')
+            .replace(/"/g, '&quot;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;');
+    }
+
+    bearingCellHTML(prefillBearingString) {
+        const mode = this.getBearingFormatMode();
+        let deg = 0, min = 0, sec = 0, decimal = 0;
+        if (prefillBearingString) {
+            const parsed = this.parseBearing(prefillBearingString);
+            deg = parsed.degrees; min = parsed.minutes; sec = parsed.seconds;
+            decimal = this.bearingToDecimal(deg, min, sec);
+        }
+        const hiddenValue = this.escapeHtmlAttr(prefillBearingString || '');
+
+        if (mode === 'decimal') {
+            const decStr = prefillBearingString ? decimal.toFixed(4) : '';
+            return `<input type="text" class="bearing-decimal" placeholder="0-360" value="${decStr}" inputmode="decimal">°
+                <input type="hidden" class="bearing-input" value="${hiddenValue}">`;
+        }
+
+        if (mode === 'quadrant') {
+            let q = { ns: 'N', degrees: '', minutes: '', ew: 'E' };
+            if (prefillBearingString) q = this.azimuthToQuadrant(decimal);
+            return `<span class="bearing-group">
+                <select class="bearing-ns">
+                    <option ${q.ns === 'N' ? 'selected' : ''}>N</option>
+                    <option ${q.ns === 'S' ? 'selected' : ''}>S</option>
+                </select>
+                <input type="text" class="bearing-deg-q" placeholder="DD" maxlength="2" value="${q.degrees}" inputmode="numeric">°
+                <input type="text" class="bearing-min-q" placeholder="MM" maxlength="2" value="${q.minutes}" inputmode="numeric">'
+                <select class="bearing-ew">
+                    <option ${q.ew === 'E' ? 'selected' : ''}>E</option>
+                    <option ${q.ew === 'W' ? 'selected' : ''}>W</option>
+                </select>
+            </span><input type="hidden" class="bearing-input" value="${hiddenValue}">`;
+        }
+
+        // Default: DMS, three boxes
+        return `<span class="bearing-group">
+            <input type="text" class="bearing-deg" placeholder="0-360" maxlength="3" value="${prefillBearingString ? deg : ''}" inputmode="numeric">°
+            <input type="text" class="bearing-min" placeholder="MM" maxlength="2" value="${prefillBearingString ? min : ''}" inputmode="numeric">'
+            <input type="text" class="bearing-sec" placeholder="SS" maxlength="2" value="${prefillBearingString ? sec : ''}" inputmode="numeric">"
+        </span><input type="hidden" class="bearing-input" value="${hiddenValue}">`;
+    }
+
+    // Recombines whichever visible bearing fields a row has into the
+    // hidden combined value, based on the currently selected format.
+    syncBearingHiddenField(row) {
+        const mode = this.getBearingFormatMode();
+        const hidden = row.querySelector('.bearing-input');
+        if (!hidden) return;
+
+        if (mode === 'decimal') {
+            const box = row.querySelector('.bearing-decimal');
+            hidden.value = box && box.value.trim() !== '' ? box.value.trim() : '';
+            return;
+        }
+
+        if (mode === 'quadrant') {
+            const ns = row.querySelector('.bearing-ns');
+            const ew = row.querySelector('.bearing-ew');
+            const degBox = row.querySelector('.bearing-deg-q');
+            const minBox = row.querySelector('.bearing-min-q');
+            if (!ns || !ew || !degBox || !minBox) return;
+            if (degBox.value === '' && minBox.value === '') {
+                hidden.value = '';
+                return;
+            }
+            const d = Math.min(90, Math.max(0, parseInt(degBox.value) || 0));
+            const m = Math.min(59, Math.max(0, parseInt(minBox.value) || 0));
+            const azimuth = this.quadrantToAzimuth(ns.value, d, m, ew.value);
+            const degrees = Math.floor(azimuth);
+            const minutes = Math.floor((azimuth - degrees) * 60);
+            const seconds = Math.round(((azimuth - degrees) * 60 - minutes) * 60);
+            hidden.value = `${degrees}°${String(minutes).padStart(2, '0')}'${String(seconds).padStart(2, '0')}"`;
+            return;
+        }
+
+        // DMS mode
+        const degBox = row.querySelector('.bearing-deg');
+        const minBox = row.querySelector('.bearing-min');
+        const secBox = row.querySelector('.bearing-sec');
+        if (!degBox || !minBox || !secBox) return;
+        if (degBox.value === '' && minBox.value === '' && secBox.value === '') {
+            hidden.value = '';
+            return;
+        }
+        const d = Math.min(360, Math.max(0, parseInt(degBox.value) || 0));
+        const m = Math.min(59, Math.max(0, parseInt(minBox.value) || 0));
+        const s = Math.min(59, Math.max(0, parseInt(secBox.value) || 0));
+        hidden.value = `${d}°${String(m).padStart(2, '0')}'${String(s).padStart(2, '0')}"`;
+    }
+
+    // Rebuilds every row's bearing cell to match whichever format is
+    // now selected, carrying over the value each row already had so
+    // switching formats never loses data.
+    rebuildAllBearingCells() {
+        document.querySelectorAll('#traverseTable tbody tr').forEach(row => {
+            const hidden = row.querySelector('.bearing-input');
+            const currentValue = hidden ? hidden.value : '';
+            const cell = hidden.closest('td');
+            cell.innerHTML = this.bearingCellHTML(currentValue);
+        });
+    }
+
+    // The table shows newest legs at the top for convenience, but a
+    // traverse survey is inherently sequential - leg 5 continues from
+    // wherever leg 4 ended. This always returns rows in their REAL
+    // order (by creation sequence), never by visual position, so the
+    // actual survey math is never affected by display order.
+    getOrderedRows() {
+        const rows = Array.from(document.querySelectorAll('#traverseTable tbody tr'));
+        return rows.sort((a, b) => parseInt(a.dataset.legSeq) - parseInt(b.dataset.legSeq));
+    }
+
     addLeg() {
         const tbody = document.querySelector('#traverseTable tbody');
-        const rowCount = tbody.children.length + 1;
+        this.legSeqCounter++;
+        const legSeq = this.legSeqCounter;
         
         const row = document.createElement('tr');
+        row.dataset.legSeq = legSeq;
         row.innerHTML = `
-            <td>${rowCount}</td>
+            <td>${legSeq}</td>
             <td><input type="text" class="distance-input" placeholder="203.5"></td>
-            <td><input type="text" class="bearing-input" placeholder="321530" maxlength="6"></td>
+            <td>${this.bearingCellHTML('')}</td>
             <td>
                 <button class="edit-btn" onclick="chainSurvey.editLeg(this)">✏️</button>
                 <button class="delete-btn" onclick="chainSurvey.deleteLeg(this)">🗑️</button>
             </td>
         `;
         
-        tbody.appendChild(row);
+        // Newest leg goes to the top of the table - with many rows, the
+        // one you just added is always immediately visible.
+        tbody.insertBefore(row, tbody.firstChild);
         this.updateLivePreview();
     }
 
@@ -436,22 +780,28 @@ export class ChainSurveyConverter {
             this.addLeg();
             this.addLeg();
             
-            const rows = tbody.querySelectorAll('tr');
+            const rows = this.getOrderedRows(); // true order: [leg1, leg2, leg3, leg4]
             if (rows.length >= 4) {
                 rows[1].querySelector('.distance-input').value = '344';
-                rows[1].querySelector('.bearing-input').value = '960000';
-                
                 rows[2].querySelector('.distance-input').value = '516';
-                rows[2].querySelector('.bearing-input').value = '2300000';
-                
                 rows[3].querySelector('.distance-input').value = '285';
-                rows[3].querySelector('.bearing-input').value = '3000000';
-                
-                rows[1].querySelector('.bearing-input').value = '96°00\'00"';
-                rows[2].querySelector('.bearing-input').value = '230°00\'00"';
-                rows[3].querySelector('.bearing-input').value = '300°00\'00"';
+
+                this.fillBearingBoxes(rows[1], 96, 0, 0);
+                this.fillBearingBoxes(rows[2], 230, 0, 0);
+                this.fillBearingBoxes(rows[3], 300, 0, 0);
             }
         }
+    }
+
+    // Fills a row's bearing cell (in whichever format is currently
+    // selected) from a degrees/minutes/seconds value, and keeps the
+    // hidden combined field in sync - used for demo data and for the
+    // edit modal, so the cell never shows something different from
+    // what's actually stored underneath.
+    fillBearingBoxes(row, degrees, minutes, seconds) {
+        const formatted = this.bearingToFormattedString(degrees, minutes, seconds);
+        const cell = row.querySelector('.bearing-input').closest('td');
+        cell.innerHTML = this.bearingCellHTML(formatted);
     }
 
     editLeg(button) {
@@ -475,16 +825,8 @@ export class ChainSurveyConverter {
         if (confirm('Are you sure you want to delete this leg?')) {
             const row = button.closest('tr');
             row.remove();
-            this.renumberRows();
             this.updateLivePreview();
         }
-    }
-
-    renumberRows() {
-        const rows = document.querySelectorAll('#traverseTable tbody tr');
-        rows.forEach((row, index) => {
-            row.cells[0].textContent = index + 1;
-        });
     }
 
     saveEdit() {
@@ -498,7 +840,7 @@ export class ChainSurveyConverter {
         const bearing = this.bearingToFormattedString(degrees, minutes, seconds);
         
         this.currentEditRow.querySelector('.distance-input').value = distance;
-        this.currentEditRow.querySelector('.bearing-input').value = bearing;
+        this.fillBearingBoxes(this.currentEditRow, degrees, minutes, seconds);
         
         document.getElementById('editModal').style.display = 'none';
         this.currentEditRow = null;
@@ -533,7 +875,7 @@ export class ChainSurveyConverter {
             </div>
         `;
         
-        const rows = document.querySelectorAll('#traverseTable tbody tr');
+        const rows = this.getOrderedRows(); // process legs in true survey order, never visual position
         
         rows.forEach((row, index) => {
             const distanceInput = row.querySelector('.distance-input');
@@ -583,9 +925,18 @@ export class ChainSurveyConverter {
         this.recalculateCoordinates();
         
         if (this.coordinates.length < 1) return;
+
+        const positions = this.coordinates.map(coord => this.getPlotPosition(coord));
+        if (positions.some(p => p === null)) {
+            // Not georeferenced yet - fall back to local view instead of
+            // plotting garbage on top of a real map.
+            return;
+        }
         
         this.coordinates.forEach((coord, index) => {
-            const marker = L.circleMarker([coord.x, coord.y], {
+            const pos = positions[index];
+
+            const marker = L.circleMarker(pos, {
                 radius: 6,
                 fillColor: index === 0 ? '#28a745' : '#ff6b6b',
                 color: '#fff',
@@ -600,7 +951,7 @@ export class ChainSurveyConverter {
                 this.editCoordinates(index);
             });
             
-            L.marker([coord.x, coord.y], {
+            L.marker(pos, {
                 icon: L.divIcon({
                     className: 'point-label',
                     html: `<div style="background: white; padding: 2px 6px; border-radius: 3px; font-weight: bold; font-size: 11px; border: 1px solid #ccc;">${index}</div>`,
@@ -611,7 +962,7 @@ export class ChainSurveyConverter {
         });
         
         if (this.coordinates.length > 1) {
-            const leafletCoords = this.coordinates.map(coord => [coord.x, coord.y]);
+            const leafletCoords = positions;
             
             L.polyline(leafletCoords, {
                 color: '#4a69bd',
@@ -631,104 +982,134 @@ export class ChainSurveyConverter {
         }
     }
 
-    recalculateCoordinates() {
-        this.coordinates = [];
-        
+    // Walks the traverse legs in true order, building each point's local
+    // X/Y by dead-reckoning (distance + bearing from the previous point) -
+    // UNLESS a row was imported with a known real lat/long, in which case
+    // that becomes the point's actual position (converted via whichever
+    // coordinate system is selected), and every leg after it continues
+    // from that corrected point onward. This is standard survey practice:
+    // checking into a known control point partway through a traverse.
+    buildTraverseCoordinates() {
         const startX = parseFloat(document.getElementById('startX').value) || 0;
         const startY = parseFloat(document.getElementById('startY').value) || 0;
-        
+
         const unit = document.getElementById('distanceUnit').value;
         const conversionFactor = this.conversionFactors[unit];
-        
+
         let currentX = startX;
         let currentY = startY;
-        this.coordinates.push({ x: currentX, y: currentY, leg: 0 });
-        
-        const rows = document.querySelectorAll('#traverseTable tbody tr');
-        
+        const coordinates = [{ x: currentX, y: currentY, leg: 0 }];
+        const traverseData = [];
+
+        const rows = this.getOrderedRows(); // process legs in true survey order, never visual position
+        let unsupportedCrsWarned = false;
+
         rows.forEach((row, index) => {
             const distanceInput = row.querySelector('.distance-input');
             const bearingInput = row.querySelector('.bearing-input');
-            
+
             if (!distanceInput.value || !bearingInput.value) return;
-            
+
             const distance = parseFloat(distanceInput.value) * conversionFactor;
             const bearing = this.parseBearing(bearingInput.value);
             const bearingDecimal = this.bearingToDecimal(bearing.degrees, bearing.minutes, bearing.seconds);
-            
             const bearingRad = (bearingDecimal * Math.PI) / 180;
-            
+
             const deltaX = distance * Math.sin(bearingRad);
             const deltaY = distance * Math.cos(bearingRad);
-            
+
             currentX += deltaX;
             currentY += deltaY;
-            
-            this.coordinates.push({ 
-                x: currentX, 
-                y: currentY, 
-                leg: index + 1,
-                distance: distance,
-                bearing: bearingDecimal
-            });
+
+            const point = { x: currentX, y: currentY, leg: index + 1, distance, bearing: bearingDecimal };
+
+            const importLat = row.dataset.importLat;
+            const importLng = row.dataset.importLng;
+            if (importLat !== undefined && importLng !== undefined) {
+                const converted = this.latLngToLocalXY(parseFloat(importLat), parseFloat(importLng));
+                if (converted) {
+                    currentX = converted.x;
+                    currentY = converted.y;
+                    point.x = currentX;
+                    point.y = currentY;
+                    point.latitude = parseFloat(importLat);
+                    point.longitude = parseFloat(importLng);
+                } else if (!unsupportedCrsWarned) {
+                    unsupportedCrsWarned = true;
+                    this.showMessage(
+                        `Some legs were imported with a real position, but "${this.getSelectedCRS()}" can't use it yet - select "WGS 84 / UTM Zone 43N" as the coordinate system.`,
+                        'error'
+                    );
+                }
+            }
+
+            coordinates.push(point);
+            traverseData.push({ leg: index + 1, distance, bearing: bearingDecimal, x: currentX, y: currentY });
         });
+
+        // Point 0 (the traverse's starting point) normally just sits at
+        // whatever Start X/Y default to (usually 0,0 - meaningless).
+        // But if the first leg is anchored to a real position, point 0's
+        // real position can be worked out too, by walking backwards
+        // along that same leg's distance and bearing.
+        if (coordinates.length > 1 && coordinates[1].latitude != null && coordinates[0].latitude == null) {
+            const firstLeg = coordinates[1];
+            const bearingRad = (firstLeg.bearing * Math.PI) / 180;
+            const deltaX = firstLeg.distance * Math.sin(bearingRad);
+            const deltaY = firstLeg.distance * Math.cos(bearingRad);
+            coordinates[0].x = firstLeg.x - deltaX;
+            coordinates[0].y = firstLeg.y - deltaY;
+            const derived = this.localXYToLatLng(coordinates[0].x, coordinates[0].y);
+            if (derived) {
+                coordinates[0].latitude = derived.lat;
+                coordinates[0].longitude = derived.lng;
+            }
+        }
+
+        return { coordinates, traverseData };
+    }
+
+    recalculateCoordinates() {
+        this.coordinates = this.buildTraverseCoordinates().coordinates;
     }
 
     calculatePlot() {
-        this.traverseData = [];
-        this.coordinates = [];
-        
-        const startX = parseFloat(document.getElementById('startX').value) || 0;
-        const startY = parseFloat(document.getElementById('startY').value) || 0;
-        
-        const unit = document.getElementById('distanceUnit').value;
-        const conversionFactor = this.conversionFactors[unit];
-        
-        let currentX = startX;
-        let currentY = startY;
-        this.coordinates.push({ x: currentX, y: currentY, leg: 0 });
-        
-        const rows = document.querySelectorAll('#traverseTable tbody tr');
-        
-        rows.forEach((row, index) => {
-            const distanceInput = row.querySelector('.distance-input');
-            const bearingInput = row.querySelector('.bearing-input');
-            
-            if (!distanceInput.value || !bearingInput.value) return;
-            
-            const distance = parseFloat(distanceInput.value) * conversionFactor;
-            const bearing = this.parseBearing(bearingInput.value);
-            const bearingDecimal = this.bearingToDecimal(bearing.degrees, bearing.minutes, bearing.seconds);
-            
-            const bearingRad = (bearingDecimal * Math.PI) / 180;
-            
-            const deltaX = distance * Math.sin(bearingRad);
-            const deltaY = distance * Math.cos(bearingRad);
-            
-            currentX += deltaX;
-            currentY += deltaY;
-            
-            this.coordinates.push({ 
-                x: currentX, 
-                y: currentY, 
-                leg: index + 1,
-                distance: distance,
-                bearing: bearingDecimal
-            });
-            
-            this.traverseData.push({
-                leg: index + 1,
-                distance: distance,
-                bearing: bearingDecimal,
-                x: currentX,
-                y: currentY
-            });
-        });
-        
+        const { coordinates, traverseData } = this.buildTraverseCoordinates();
+        this.coordinates = coordinates;
+        this.traverseData = traverseData;
+
+        // Fixes the "shape only appears correctly after switching map
+        // layers" issue - Leaflet doesn't automatically notice when its
+        // container has changed size (e.g. right after the page loads,
+        // or a panel was toggled earlier), so tell it to recheck now.
+        this.map.invalidateSize();
+
         this.plotShape();
         this.calculateStats();
         this.updateCoordinatesTable();
         this.showMessage('Plot calculated successfully!', 'success');
+    }
+
+    // Simple Plot mode draws directly in local survey meters (x,y).
+    // Real map layers (OpenStreetMap/Satellite/Terrain) need actual
+    // latitude/longitude - which only exist once "Calculate Georeference"
+    // has been run. Using local meters as if they were GPS degrees is
+    // exactly what was causing points to appear on the wrong continent.
+    getPlotPosition(coord) {
+        if (this.currentMapLayer === 'simple' || !this.currentMapLayer) {
+            return [coord.x, coord.y];
+        }
+        if (coord.latitude != null && coord.longitude != null && !isNaN(coord.latitude) && !isNaN(coord.longitude)) {
+            return [coord.latitude, coord.longitude];
+        }
+        // No lat/long set yet (no GCP transform, no imported anchor point) -
+        // if the selected coordinate system has a known real-world
+        // projection (like UTM Zone 43N), derive it directly.
+        const derived = this.localXYToLatLng(coord.x, coord.y);
+        if (derived) {
+            return [derived.lat, derived.lng];
+        }
+        return null;
     }
 
     plotShape() {
@@ -736,7 +1117,14 @@ export class ChainSurveyConverter {
         
         if (this.coordinates.length < 2) return;
         
-        const leafletCoords = this.coordinates.map(coord => [coord.x, coord.y]);
+        const positions = this.coordinates.map(coord => this.getPlotPosition(coord));
+
+        if (positions.some(p => p === null)) {
+            this.showMessage('⚠ Click "Calculate Georeference" first to view this plot on a real-world map layer', 'error');
+            return;
+        }
+
+        const leafletCoords = positions;
         
         const polyline = L.polyline(leafletCoords, {
             color: '#4a69bd',
@@ -754,7 +1142,9 @@ export class ChainSurveyConverter {
         }
         
         this.coordinates.forEach((coord, index) => {
-            const marker = L.circleMarker([coord.x, coord.y], {
+            const pos = positions[index];
+
+            const marker = L.circleMarker(pos, {
                 radius: 6,
                 fillColor: '#ff6b6b',
                 color: '#fff',
@@ -769,7 +1159,7 @@ export class ChainSurveyConverter {
                 this.editCoordinates(index);
             });
             
-            L.marker([coord.x, coord.y], {
+            L.marker(pos, {
                 icon: L.divIcon({
                     className: 'point-label',
                     html: `<div style="background: white; padding: 2px 6px; border-radius: 3px; font-weight: bold; font-size: 12px; border: 1px solid #ccc;">${index}</div>`,
@@ -862,6 +1252,20 @@ export class ChainSurveyConverter {
             }
         }
         
+        // Moving each point's local X/Y here would otherwise leave any
+        // already-computed real lat/long stale and mismatched with the
+        // new position. Re-sync it: if a GCP transform exists, re-apply
+        // it to the corrected coordinates; otherwise clear the stale
+        // values so the map re-derives them fresh from the new position.
+        if (this.georeferenceMatrix) {
+            this.transformCoordinates();
+        } else {
+            this.coordinates.forEach(c => {
+                delete c.latitude;
+                delete c.longitude;
+            });
+        }
+
         this.plotShape();
         this.calculateStats();
         this.updateCoordinatesTable();
@@ -877,13 +1281,20 @@ export class ChainSurveyConverter {
             const row = tbody.insertRow();
             row.style.cursor = 'pointer';
             row.onclick = () => this.editCoordinates(index);
+
+            let lat = coord.latitude;
+            let lng = coord.longitude;
+            if (lat == null || lng == null) {
+                const derived = this.localXYToLatLng(coord.x, coord.y);
+                if (derived) { lat = derived.lat; lng = derived.lng; }
+            }
             
             row.innerHTML = `
                 <td>${index}</td>
                 <td>${coord.x.toFixed(3)}</td>
                 <td>${coord.y.toFixed(3)}</td>
-                <td>${coord.latitude ? coord.latitude.toFixed(6) : '-'}</td>
-                <td>${coord.longitude ? coord.longitude.toFixed(6) : '-'}</td>
+                <td>${lat != null ? lat.toFixed(6) : '-'}</td>
+                <td>${lng != null ? lng.toFixed(6) : '-'}</td>
                 <td><button class="edit-btn" onclick="chainSurvey.editCoordinates(${index})" style="width: 40px; padding: 3px;">Edit</button></td>
             `;
         });
@@ -975,29 +1386,46 @@ export class ChainSurveyConverter {
     }
 
     switchMapLayer(layerType) {
-        Object.keys(this.mapLayers).forEach(key => {
-            if (this.mapLayers[key] instanceof L.LayerGroup) {
-                this.map.removeLayer(this.mapLayers[key]);
-            } else if (this.mapLayers[key] instanceof L.TileLayer) {
-                this.map.removeLayer(this.mapLayers[key]);
+        const wasSimple = this.currentMapLayer === 'simple' || !this.currentMapLayer;
+        const willBeSimple = layerType === 'simple';
+        const realWorldCenter = [11.8745, 75.3572];
+
+        if (wasSimple !== willBeSimple) {
+            // Crossing between local-meters mode and real-world mode -
+            // the map's CRS has to change, which means rebuilding it.
+            this.map.remove();
+            this.createMapInstance(
+                willBeSimple ? L.CRS.Simple : L.CRS.EPSG3857,
+                willBeSimple ? [0, 0] : realWorldCenter,
+                willBeSimple ? 16 : 14
+            );
+            this.setupMapLayers();
+            if (willBeSimple) {
+                this.addCoordinateGrid();
+            } else {
+                this.gridLayer = null; // doesn't make sense at real-world scale
             }
-        });
+            this.plotLayer = L.layerGroup().addTo(this.map);
+            this.attachMapClickHandler();
+        } else {
+            // Staying within the same CRS (e.g. OSM -> Satellite) - just
+            // swap which tile layer is showing.
+            Object.keys(this.mapLayers).forEach(key => {
+                this.map.removeLayer(this.mapLayers[key]);
+            });
+        }
 
         if (layerType === 'simple') {
             this.mapLayers.simple.addTo(this.map);
-            this.map.options.crs = L.CRS.Simple;
         } else if (layerType === 'osm') {
             this.mapLayers.osm.addTo(this.map);
-            this.map.options.crs = L.CRS.EPSG3857;
-            this.map.setView([11.8745, 75.3572], 14);
+            this.map.setView(realWorldCenter, 14);
         } else if (layerType === 'satellite') {
             this.mapLayers.satellite.addTo(this.map);
-            this.map.options.crs = L.CRS.EPSG3857;
-            this.map.setView([11.8745, 75.3572], 14);
+            this.map.setView(realWorldCenter, 14);
         } else if (layerType === 'terrain') {
             this.mapLayers.terrain.addTo(this.map);
-            this.map.options.crs = L.CRS.EPSG3857;
-            this.map.setView([11.8745, 75.3572], 14);
+            this.map.setView(realWorldCenter, 14);
         }
 
         if (this.plotLayer) {
@@ -1006,6 +1434,8 @@ export class ChainSurveyConverter {
         }
 
         this.currentMapLayer = layerType;
+        this.plotShape();
+        this.map.invalidateSize();
 
         // Close the layer picker now that a choice has been made, so it
         // doesn't sit open and block the map underneath it.
@@ -1039,11 +1469,6 @@ export class ChainSurveyConverter {
         const gcpList = document.getElementById('gcpList');
         const gcpCount = gcpList.children.length + 1;
         
-        if (gcpCount > 4) {
-            this.showMessage('Maximum 4 GCPs allowed', 'error');
-            return;
-        }
-        
         const gcpDiv = document.createElement('div');
         gcpDiv.className = 'gcp-item';
         gcpDiv.innerHTML = `
@@ -1061,41 +1486,43 @@ export class ChainSurveyConverter {
         button.parentElement.remove();
     }
 
-    calculateGeoreference() {
+    calculateGeoreference(silent = false) {
         const gcpItems = document.querySelectorAll('.gcp-item');
         
         if (gcpItems.length < 4) {
-            this.showMessage('Please add minimum 4 Ground Control Points', 'error');
+            if (!silent) this.showMessage('Please add minimum 4 Ground Control Points', 'error');
             return;
         }
         
         const gcps = [];
-        gcpItems.forEach(item => {
-            const gcp = {
-                surveyX: parseFloat(item.querySelector('.gcp-survey-x').value),
-                surveyY: parseFloat(item.querySelector('.gcp-survey-y').value),
-                realLat: parseFloat(item.querySelector('.gcp-real-lat').value),
-                realLng: parseFloat(item.querySelector('.gcp-real-lng').value)
-            };
-            
-            if (isNaN(gcp.surveyX) || isNaN(gcp.surveyY) || isNaN(gcp.realLat) || isNaN(gcp.realLng)) {
-                throw new Error('All GCP fields must be filled');
-            }
-            
-            // Validate lat/lng
-            if (gcp.realLat < -90 || gcp.realLat > 90 || gcp.realLng < -180 || gcp.realLng > 180) {
-                throw new Error('Invalid latitude/longitude values');
-            }
-            
-            gcps.push(gcp);
-        });
-        
         try {
+            gcpItems.forEach(item => {
+                const gcp = {
+                    surveyX: parseFloat(item.querySelector('.gcp-survey-x').value),
+                    surveyY: parseFloat(item.querySelector('.gcp-survey-y').value),
+                    realLat: parseFloat(item.querySelector('.gcp-real-lat').value),
+                    realLng: parseFloat(item.querySelector('.gcp-real-lng').value)
+                };
+
+                if (isNaN(gcp.surveyX) || isNaN(gcp.surveyY) || isNaN(gcp.realLat) || isNaN(gcp.realLng)) {
+                    throw new Error('All GCP fields must be filled');
+                }
+
+                // Validate lat/lng
+                if (gcp.realLat < -90 || gcp.realLat > 90 || gcp.realLng < -180 || gcp.realLng > 180) {
+                    throw new Error('Invalid latitude/longitude values');
+                }
+
+                gcps.push(gcp);
+            });
+
             this.georeferenceMatrix = this.calculateAffineTransform(gcps);
             this.transformCoordinates();
-            this.showMessage('✓ Georeferencing complete! All points transformed.', 'success');
+            if (!silent) this.showMessage('✓ Georeferencing complete! All points transformed.', 'success');
         } catch (error) {
-            this.showMessage('Error: ' + error.message, 'error');
+            // While typing, an incomplete/invalid GCP is normal and expected -
+            // only surface the error when the user explicitly clicked the button.
+            if (!silent) this.showMessage('Error: ' + error.message, 'error');
         }
     }
 
@@ -1180,7 +1607,12 @@ export class ChainSurveyConverter {
 
     // ===== SAVE/LOAD FUNCTIONS =====
     
-    saveProject() {
+    async saveProject() {
+        if (!auth.currentUser) {
+            this.showMessage('You must be logged in to save a project', 'error');
+            return;
+        }
+
         const projectName = document.getElementById('projectName').value || 'Unnamed Project';
         
         const projectData = {
@@ -1193,93 +1625,197 @@ export class ChainSurveyConverter {
             bearingFormat: document.getElementById('bearingFormat').value,
             traverseData: [],
             coordinates: this.coordinates,
-            timestamp: new Date().toISOString()
+            timestamp: new Date().toISOString(),
+            ownerId: auth.currentUser.uid
         };
         
-        const rows = document.querySelectorAll('#traverseTable tbody tr');
+        const rows = this.getOrderedRows(); // process legs in true survey order, never visual position
         rows.forEach((row) => {
             const distance = row.querySelector('.distance-input').value;
             const bearing = row.querySelector('.bearing-input').value;
             if (distance && bearing) {
-                projectData.traverseData.push({ distance, bearing });
+                const leg = { distance, bearing };
+                // Keep any imported real-world anchor position attached,
+                // so reloading this project doesn't lose it.
+                if (row.dataset.importLat !== undefined && row.dataset.importLng !== undefined) {
+                    leg.latitude = parseFloat(row.dataset.importLat);
+                    leg.longitude = parseFloat(row.dataset.importLng);
+                }
+                projectData.traverseData.push(leg);
             }
         });
+
+        // Firestore document IDs can't contain slashes and a few other
+        // characters - swap them out so any project name is safe to use.
+        const safeName = projectName.replace(/[\/.#$\[\]]/g, '-');
+        const docId = `${auth.currentUser.uid}_${safeName}`;
+        this.currentProjectDocId = docId;
         
-        const projects = JSON.parse(localStorage.getItem('surveyProjects') || '{}');
-        projects[projectName] = projectData;
-        localStorage.setItem('surveyProjects', JSON.stringify(projects));
-        
-        this.downloadFile(JSON.stringify(projectData, null, 2), `${projectName}.json`, 'application/json');
-        
-        this.showMessage(`✓ Project "${projectName}" saved!`, 'success');
+        try {
+            await setDoc(doc(db, 'projects', docId), projectData);
+            this.downloadFile(JSON.stringify(projectData, null, 2), `${projectName}.json`, 'application/json');
+            this.showMessage(`✓ Project "${projectName}" saved to the cloud!`, 'success');
+        } catch (error) {
+            this.showMessage('Error saving project: ' + error.message, 'error');
+        }
     }
 
-    loadProject() {
-        this.listProjects();
+    async loadProject() {
+        await this.listProjects();
         document.getElementById('projectSelect').style.display = 'block';
     }
 
-    listProjects() {
-        const projects = JSON.parse(localStorage.getItem('surveyProjects') || '{}');
-        const select = document.getElementById('projectSelect');
-        
-        select.innerHTML = '<option>-- Select Project --</option>';
-        
-        Object.keys(projects).forEach(name => {
-            const option = document.createElement('option');
-            option.value = name;
-            const date = new Date(projects[name].timestamp).toLocaleDateString();
-            option.textContent = `${name} (${date})`;
-            select.appendChild(option);
-        });
-        
-        if (Object.keys(projects).length === 0) {
-            this.showMessage('No saved projects', 'error');
-            select.style.display = 'none';
+    async shareProject() {
+        if (!this.currentProjectDocId) {
+            this.showMessage('Save or load a project first, then share it', 'error');
+            return;
+        }
+
+        const email = prompt('Enter the email address of the person to share this project with:');
+        if (!email) return;
+
+        try {
+            // Find that person's account by email - everyone's email is
+            // stored in their own user profile document at login time.
+            const userQuery = query(collection(db, 'users'), where('email', '==', email.trim()));
+            const userSnapshot = await getDocs(userQuery);
+
+            if (userSnapshot.empty) {
+                this.showMessage(`No account found for "${email}" - they need to sign up first`, 'error');
+                return;
+            }
+
+            const targetUid = userSnapshot.docs[0].id;
+
+            if (targetUid === auth.currentUser.uid) {
+                this.showMessage("That's already your own account", 'error');
+                return;
+            }
+
+            await updateDoc(doc(db, 'projects', this.currentProjectDocId), {
+                sharedWith: arrayUnion(targetUid)
+            });
+
+            this.showMessage(`✓ Shared with ${email}`, 'success');
+        } catch (error) {
+            this.showMessage('Error sharing project: ' + error.message, 'error');
         }
     }
 
-    selectProjectToLoad(projectName) {
-        if (projectName === '-- Select Project --') return;
-        
-        const projects = JSON.parse(localStorage.getItem('surveyProjects') || '{}');
-        const projectData = projects[projectName];
-        
-        if (!projectData) {
-            this.showMessage('Project not found', 'error');
+    async listProjects() {
+        if (!auth.currentUser) {
+            this.showMessage('You must be logged in to load projects', 'error');
             return;
         }
+
+        const select = document.getElementById('projectSelect');
+        select.innerHTML = '<option>-- Select Project --</option>';
         
-        document.getElementById('projectName').value = projectData.name;
-        document.getElementById('surveyNumber').value = projectData.surveyNumber;
-        document.getElementById('village').value = projectData.village;
-        document.getElementById('startX').value = projectData.startX;
-        document.getElementById('startY').value = projectData.startY;
-        document.getElementById('distanceUnit').value = projectData.distanceUnit;
-        document.getElementById('bearingFormat').value = projectData.bearingFormat;
+        try {
+            const uid = auth.currentUser.uid;
+            const role = window.currentUserRole;
+            const seenIds = new Set();
+            const results = []; // { id, data, label }
+
+            const addDocs = (snapshot, label) => {
+                snapshot.forEach((docSnap) => {
+                    if (seenIds.has(docSnap.id)) return;
+                    seenIds.add(docSnap.id);
+                    results.push({ id: docSnap.id, data: docSnap.data(), label });
+                });
+            };
+
+            if (role === 'admin') {
+                // Admins see every project in the system.
+                const allSnapshot = await getDocs(collection(db, 'projects'));
+                addDocs(allSnapshot, 'all projects');
+            } else {
+                const ownSnapshot = await getDocs(
+                    query(collection(db, 'projects'), where('ownerId', '==', uid))
+                );
+                addDocs(ownSnapshot, 'yours');
+
+                const sharedSnapshot = await getDocs(
+                    query(collection(db, 'projects'), where('sharedWith', 'array-contains', uid))
+                );
+                addDocs(sharedSnapshot, 'shared with you');
+            }
+
+            if (results.length === 0) {
+                this.showMessage('No saved projects yet', 'error');
+                select.style.display = 'none';
+                return;
+            }
+
+            results.forEach(({ id, data, label }) => {
+                const option = document.createElement('option');
+                option.value = id;
+                const date = new Date(data.timestamp).toLocaleDateString();
+                option.textContent = `${data.name} (${date}) - ${label}`;
+                select.appendChild(option);
+            });
+        } catch (error) {
+            this.showMessage('Error loading project list: ' + error.message, 'error');
+        }
+    }
+
+    async selectProjectToLoad(docId) {
+        if (!docId || docId === '-- Select Project --') return;
+        this.currentProjectDocId = docId;
         
-        const tbody = document.querySelector('#traverseTable tbody');
-        tbody.innerHTML = '';
-        
-        projectData.traverseData.forEach((row, index) => {
-            const tr = document.createElement('tr');
-            tr.innerHTML = `
-                <td>${index + 1}</td>
-                <td><input type="text" class="distance-input" value="${row.distance}"></td>
-                <td><input type="text" class="bearing-input" value="${row.bearing}"></td>
-                <td>
-                    <button class="edit-btn" onclick="chainSurvey.editLeg(this)">✏️</button>
-                    <button class="delete-btn" onclick="chainSurvey.deleteLeg(this)">🗑️</button>
-                </td>
-            `;
-            tbody.appendChild(tr);
-        });
-        
-        this.coordinates = projectData.coordinates;
-        this.calculatePlot();
-        document.getElementById('projectSelect').style.display = 'none';
-        
-        this.showMessage(`✓ Project "${projectName}" loaded!`, 'success');
+        try {
+            const docSnap = await getDoc(doc(db, 'projects', docId));
+            if (!docSnap.exists()) {
+                this.showMessage('Project not found', 'error');
+                return;
+            }
+            const projectData = docSnap.data();
+
+            document.getElementById('projectName').value = projectData.name;
+            document.getElementById('surveyNumber').value = projectData.surveyNumber;
+            document.getElementById('village').value = projectData.village;
+            document.getElementById('startX').value = projectData.startX;
+            document.getElementById('startY').value = projectData.startY;
+            document.getElementById('distanceUnit').value = projectData.distanceUnit;
+            document.getElementById('bearingFormat').value = projectData.bearingFormat;
+            
+            const tbody = document.querySelector('#traverseTable tbody');
+            tbody.innerHTML = '';
+            
+            projectData.traverseData.forEach((row, index) => {
+                const legSeq = index + 1;
+                const tr = document.createElement('tr');
+                tr.dataset.legSeq = legSeq;
+
+                const hasLatLng = row.latitude != null && row.longitude != null;
+                if (hasLatLng) {
+                    tr.dataset.importLat = row.latitude;
+                    tr.dataset.importLng = row.longitude;
+                }
+
+                tr.innerHTML = `
+                    <td>${legSeq}${hasLatLng ? ' <span title="Anchored to a real position" style="color:#28a745;">📍</span>' : ''}</td>
+                    <td><input type="text" class="distance-input" value="${this.escapeHtmlAttr(row.distance)}"></td>
+                    <td>${this.bearingCellHTML(row.bearing)}</td>
+                    <td>
+                        <button class="edit-btn" onclick="chainSurvey.editLeg(this)">✏️</button>
+                        <button class="delete-btn" onclick="chainSurvey.deleteLeg(this)">🗑️</button>
+                    </td>
+                `;
+                // Insert at the top each time, so by the end the newest
+                // (highest-numbered) leg ends up visually on top.
+                tbody.insertBefore(tr, tbody.firstChild);
+            });
+            this.legSeqCounter = projectData.traverseData.length;
+            
+            this.coordinates = projectData.coordinates;
+            this.calculatePlot();
+            document.getElementById('projectSelect').style.display = 'none';
+            
+            this.showMessage(`✓ Project "${projectData.name}" loaded!`, 'success');
+        } catch (error) {
+            this.showMessage('Error loading project: ' + error.message, 'error');
+        }
     }
 
     // ===== IMPORT FUNCTIONS =====
@@ -1305,34 +1841,78 @@ export class ChainSurveyConverter {
         }
     }
 
+    // Finds a column's position by checking whether its header contains
+    // one of the acceptable keywords (case-insensitive) - so "Lat",
+    // "Latitude", and "Distance (chains)" all match correctly.
+    findColumnIndex(headerRow, candidates) {
+        for (let i = 0; i < headerRow.length; i++) {
+            const h = String(headerRow[i] ?? '').trim().toLowerCase();
+            if (candidates.some(c => h.includes(c))) return i;
+        }
+        return -1;
+    }
+
     parseImportedData(content, filename) {
         let data = [];
         
         if (filename.endsWith('.csv')) {
             const lines = content.trim().split('\n');
+            const header = lines[0].split(',').map(h => h.trim());
+            const distIdx = this.findColumnIndex(header, ['distance']);
+            const bearIdx = this.findColumnIndex(header, ['bearing']);
+            const latIdx = this.findColumnIndex(header, ['latitude', 'lat']);
+            const lngIdx = this.findColumnIndex(header, ['longitude', 'lng', 'long']);
             
             for (let i = 1; i < lines.length; i++) {
                 const values = lines[i].split(',');
-                if (values.length >= 2) {
-                    data.push({
-                        distance: parseFloat(values[0]),
-                        bearing: values[1].trim()
-                    });
+                if (values.length < 2) continue;
+
+                const entry = {
+                    distance: parseFloat(values[distIdx >= 0 ? distIdx : 0]),
+                    bearing: (values[bearIdx >= 0 ? bearIdx : 1] || '').trim()
+                };
+
+                if (latIdx >= 0 && lngIdx >= 0 && values[latIdx] && values[lngIdx]) {
+                    const lat = parseFloat(values[latIdx]);
+                    const lng = parseFloat(values[lngIdx]);
+                    if (!isNaN(lat) && !isNaN(lng)) {
+                        entry.latitude = lat;
+                        entry.longitude = lng;
+                    }
                 }
+
+                data.push(entry);
             }
         } else if (filename.endsWith('.json')) {
+            // JSON rows may already include latitude/longitude fields
+            // directly - loadImportedData picks them up automatically.
             data = JSON.parse(content);
         } else if (filename.endsWith('.xlsx')) {
             const workbook = XLSX.read(content, { type: 'binary' });
             const sheet = workbook.Sheets[workbook.SheetNames[0]];
             const rows = XLSX.utils.sheet_to_json(sheet, { header: 1 });
+            const header = (rows[0] || []).map(h => String(h ?? '').trim());
+            const distIdx = this.findColumnIndex(header, ['distance']);
+            const bearIdx = this.findColumnIndex(header, ['bearing']);
+            const latIdx = this.findColumnIndex(header, ['latitude', 'lat']);
+            const lngIdx = this.findColumnIndex(header, ['longitude', 'lng', 'long']);
             
-            rows.forEach((row, idx) => {
+            rows.forEach((r, idx) => {
                 if (idx === 0) return;
-                const [distance, bearing] = row;
-                if (distance && bearing) {
-                    data.push({ distance, bearing });
+                const distance = r[distIdx >= 0 ? distIdx : 0];
+                const bearing = r[bearIdx >= 0 ? bearIdx : 1];
+                if (!distance || !bearing) return;
+
+                const entry = { distance, bearing };
+                if (latIdx >= 0 && lngIdx >= 0 && r[latIdx] != null && r[lngIdx] != null) {
+                    const lat = parseFloat(r[latIdx]);
+                    const lng = parseFloat(r[lngIdx]);
+                    if (!isNaN(lat) && !isNaN(lng)) {
+                        entry.latitude = lat;
+                        entry.longitude = lng;
+                    }
                 }
+                data.push(entry);
             });
         }
         
@@ -1342,22 +1922,38 @@ export class ChainSurveyConverter {
     loadImportedData(data) {
         const tbody = document.querySelector('#traverseTable tbody');
         tbody.innerHTML = '';
+        let anchoredCount = 0;
         
         data.forEach((row, index) => {
+            const legSeq = index + 1;
             const tr = document.createElement('tr');
+            tr.dataset.legSeq = legSeq;
+
+            const hasLatLng = row.latitude != null && row.longitude != null && !isNaN(row.latitude) && !isNaN(row.longitude);
+            if (hasLatLng) {
+                tr.dataset.importLat = row.latitude;
+                tr.dataset.importLng = row.longitude;
+                anchoredCount++;
+            }
+
             tr.innerHTML = `
-                <td>${index + 1}</td>
-                <td><input type="text" class="distance-input" value="${row.distance || ''}"></td>
-                <td><input type="text" class="bearing-input" value="${row.bearing || ''}"></td>
+                <td>${legSeq}${hasLatLng ? ' <span title="Anchored to imported lat/long" style="color:#28a745;">📍</span>' : ''}</td>
+                <td><input type="text" class="distance-input" value="${this.escapeHtmlAttr(row.distance || '')}"></td>
+                <td>${this.bearingCellHTML(row.bearing || '')}</td>
                 <td>
                     <button class="edit-btn" onclick="chainSurvey.editLeg(this)">✏️</button>
                     <button class="delete-btn" onclick="chainSurvey.deleteLeg(this)">🗑️</button>
                 </td>
             `;
-            tbody.appendChild(tr);
+            tbody.insertBefore(tr, tbody.firstChild);
         });
+        this.legSeqCounter = data.length;
         
-        this.showMessage(`✓ Imported ${data.length} records!`, 'success');
+        if (anchoredCount > 0 && this.getSelectedCRS() !== 'utm43n' && this.getSelectedCRS() !== 'geographic') {
+            this.showMessage(`✓ Imported ${data.length} records (${anchoredCount} with real coordinates - select "WGS 84 / UTM Zone 43N" to use them)`, 'success');
+        } else {
+            this.showMessage(`✓ Imported ${data.length} records!${anchoredCount > 0 ? ` (${anchoredCount} anchored to real coordinates 📍)` : ''}`, 'success');
+        }
         this.updateLivePreview();
     }
 
@@ -1366,13 +1962,36 @@ export class ChainSurveyConverter {
     }
 
     downloadTemplate() {
-        const csv = `Distance,Bearing
-203.5,32°15'30"
-344,96°0'0"
-516,230°0'0"
-285,300°0'0"`;
+        const unit = document.getElementById('distanceUnit').value;
+        const mode = this.getBearingFormatMode();
+
+        const distanceExamples = {
+            links: [203.5, 344, 516, 285],
+            chains: [10.2, 17.2, 25.8, 14.3],
+            feet: [667.7, 1128.6, 1692.9, 935.0],
+            meters: [203.5, 344, 516, 285]
+        }[unit] || [203.5, 344, 516, 285];
+
+        // Same four real bearings (32°15'30", 96°, 230°, 300°) written in
+        // whichever format is currently selected, so the template always
+        // matches what the app is expecting you to type right now.
+        const bearingsByMode = {
+            dms: ['32°15\'30"', '96°0\'0"', '230°0\'0"', '300°0\'0"'],
+            decimal: ['32.2583', '96.0000', '230.0000', '300.0000'],
+            quadrant: ['N 32°15\' E', 'S 84°0\' E', 'S 50°0\' W', 'N 60°0\' W']
+        };
+        const bearings = bearingsByMode[mode] || bearingsByMode.dms;
+
+        let csv = `Distance (${unit}),Bearing (${mode}),Latitude,Longitude\n`;
+        distanceExamples.forEach((d, i) => {
+            // Latitude/Longitude are optional - leave them blank for a
+            // normal leg, or fill them in on any row to anchor that point
+            // to a real GPS position (select "WGS 84 / UTM Zone 43N" as
+            // the coordinate system to actually use them).
+            csv += `${d},${bearings[i]},,\n`;
+        });
         
-        this.downloadFile(csv, 'survey_template.csv', 'text/csv');
+        this.downloadFile(csv, `survey_template_${unit}_${mode}.csv`, 'text/csv');
         this.showMessage('Template downloaded!', 'success');
     }
 
@@ -1388,7 +2007,8 @@ export class ChainSurveyConverter {
         
         this.coordinates.forEach((coord, index) => {
             const traverseItem = this.traverseData[index - 1];
-            csv += `${index},${coord.x.toFixed(3)},${coord.y.toFixed(3)},${coord.latitude ? coord.latitude.toFixed(6) : ''},${coord.longitude ? coord.longitude.toFixed(6) : ''},`;
+            const pos = this.getExportLatLng(coord);
+            csv += `${index},${coord.x.toFixed(3)},${coord.y.toFixed(3)},${pos ? pos.lat.toFixed(6) : ''},${pos ? pos.lng.toFixed(6) : ''},`;
             csv += `${traverseItem ? traverseItem.distance.toFixed(2) : ''},${traverseItem ? traverseItem.bearing.toFixed(2) : ''}\n`;
         });
         
@@ -1399,6 +2019,12 @@ export class ChainSurveyConverter {
     exportGeoJSON() {
         if (this.coordinates.length === 0) {
             this.showMessage('No data to export', 'error');
+            return;
+        }
+
+        const positions = this.coordinates.map(coord => this.getExportLatLng(coord));
+        if (positions.some(p => p === null)) {
+            this.showMessage('⚠ GeoJSON needs real coordinates for every point - select "WGS 84 / UTM Zone 43N" or finish georeferencing with GCPs first', 'error');
             return;
         }
         
@@ -1423,8 +2049,8 @@ export class ChainSurveyConverter {
                     geometry: {
                         type: 'Polygon',
                         coordinates: [[
-                            ...this.coordinates.map(coord => [coord.longitude || coord.x, coord.latitude || coord.y]),
-                            [this.coordinates[0].longitude || this.coordinates[0].x, this.coordinates[0].latitude || this.coordinates[0].y]
+                            ...positions.map(p => [p.lng, p.lat]),
+                            [positions[0].lng, positions[0].lat]
                         ]]
                     }
                 }
@@ -1440,9 +2066,15 @@ export class ChainSurveyConverter {
             this.showMessage('No data to export', 'error');
             return;
         }
+
+        const positions = this.coordinates.map(coord => this.getExportLatLng(coord));
+        if (positions.some(p => p === null)) {
+            this.showMessage('⚠ KML needs real coordinates for every point - select "WGS 84 / UTM Zone 43N" or finish georeferencing with GCPs first', 'error');
+            return;
+        }
         
-        const coords = this.coordinates.map(coord => `${coord.longitude || coord.x},${coord.latitude || coord.y},0`).join(' ');
-        const closedCoords = coords + ` ${this.coordinates[0].longitude || this.coordinates[0].x},${this.coordinates[0].latitude || this.coordinates[0].y},0`;
+        const coords = positions.map(p => `${p.lng},${p.lat},0`).join(' ');
+        const closedCoords = coords + ` ${positions[0].lng},${positions[0].lat},0`;
         
         const kml = `<?xml version="1.0" encoding="UTF-8"?>
 <kml xmlns="http://www.opengis.net/kml/2.2">
@@ -1474,6 +2106,12 @@ export class ChainSurveyConverter {
             this.showMessage('No data to export', 'error');
             return;
         }
+
+        const positions = this.coordinates.map(coord => this.getExportLatLng(coord));
+        if (positions.some(p => p === null)) {
+            this.showMessage('⚠ Shapefile needs real coordinates for every point - select "WGS 84 / UTM Zone 43N" or finish georeferencing with GCPs first', 'error');
+            return;
+        }
         
         const geojson = {
             type: 'FeatureCollection',
@@ -1489,8 +2127,8 @@ export class ChainSurveyConverter {
                 geometry: {
                     type: 'Polygon',
                     coordinates: [[
-                        ...this.coordinates.map(coord => [coord.longitude || coord.x, coord.latitude || coord.y]),
-                        [this.coordinates[0].longitude || this.coordinates[0].x, this.coordinates[0].latitude || this.coordinates[0].y]
+                        ...positions.map(p => [p.lng, p.lat]),
+                        [positions[0].lng, positions[0].lat]
                     ]]
                 }
             }]
@@ -1554,8 +2192,9 @@ export class ChainSurveyConverter {
                 doc.addPage();
                 y = 20;
             }
-            const lat = coord.latitude ? coord.latitude.toFixed(4) : '-';
-            const lng = coord.longitude ? coord.longitude.toFixed(4) : '-';
+            const pos = this.getExportLatLng(coord);
+            const lat = pos ? pos.lat.toFixed(4) : '-';
+            const lng = pos ? pos.lng.toFixed(4) : '-';
             doc.text(`${index.toString().padStart(2, ' ')}  ${coord.x.toFixed(3).padStart(9, ' ')}  ${coord.y.toFixed(3).padStart(9, ' ')}  ${lat}  ${lng}`, 20, y);
         });
         
