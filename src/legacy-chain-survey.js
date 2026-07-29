@@ -127,7 +127,17 @@ export class ChainSurveyConverter {
     // CRS.EPSG3857 that real tile servers use. Crossing between the two
     // means the whole map instance has to be torn down and rebuilt.
     createMapInstance(crs, center, zoom) {
-        this.map = L.map('mapContainer', { center, zoom, crs, layers: [] });
+        // CRS.Simple treats 1 local meter as 1 pixel at zoom 0 - a survey
+        // spanning a couple thousand meters needs to zoom out well past
+        // that to fit on screen, which the default zoom range doesn't
+        // allow. zoomSnap: 0.25 also lets it settle on a precise fit
+        // instead of only whole zoom steps.
+        const isSimple = crs === L.CRS.Simple;
+        this.map = L.map('mapContainer', {
+            center, zoom, crs, layers: [],
+            minZoom: isSimple ? -15 : 2,
+            zoomSnap: 0.25
+        });
     }
 
     attachMapClickHandler() {
@@ -249,6 +259,7 @@ export class ChainSurveyConverter {
         // Map controls
         document.getElementById('zoomFitBtn').addEventListener('click', () => this.fitToView());
         document.getElementById('fullExtentBtn').addEventListener('click', () => this.fitToFullExtent());
+        document.getElementById('mapFullscreenBtn').addEventListener('click', () => this.toggleMapFullscreen());
         document.getElementById('toggleLabelsBtn').addEventListener('click', () => this.toggleLabels());
         document.getElementById('toggleGridBtn').addEventListener('click', () => this.toggleGrid());
         document.getElementById('toggleMapLayerBtn').addEventListener('click', () => this.toggleMapLayerSelector());
@@ -1343,6 +1354,21 @@ export class ChainSurveyConverter {
         this.updateCoordinatesTable();
         document.getElementById('georefModal').style.display = 'none';
         this.showMessage(`Point ${this.currentGeorefPoint} updated to Lat: ${lat.toFixed(6)}, Lng: ${lng.toFixed(6)}`, 'success');
+    }
+
+    // Expands the whole map panel (map + its controls + stats) to cover
+    // the full screen, for a clearer working view - and back again.
+    toggleMapFullscreen() {
+        const rightPanel = document.querySelector('.right-panel');
+        const btn = document.getElementById('mapFullscreenBtn');
+        rightPanel.classList.toggle('map-fullscreen');
+
+        const isFullscreen = rightPanel.classList.contains('map-fullscreen');
+        btn.textContent = isFullscreen ? '×' : '⛶';
+        btn.title = isFullscreen ? 'Exit full screen' : 'Expand map to full screen';
+
+        // The panel just changed size - Leaflet needs a moment to notice.
+        setTimeout(() => this.map.invalidateSize(), 100);
     }
 
     fitToView() {

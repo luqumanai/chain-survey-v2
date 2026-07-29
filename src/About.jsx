@@ -108,6 +108,8 @@ function About({ onClose }) {
             <li><b>Full Extent</b> - resets the view all the way out (independent of your
             survey's shape) - useful for getting your bearings after panning or zooming
             somewhere confusing.</li>
+            <li><b>⛶ (top-right corner of the map)</b> - expands the map panel to fill the
+            whole screen; click again (now showing ×) to return to the normal layout.</li>
             <li><b>Labels</b> - toggles point number labels on/off.</li>
             <li><b>Grid</b> - toggles the local reference grid (Simple Plot mode only).</li>
             <li><b>Layers</b> - switch between Simple Plot (local, no real-world meaning),

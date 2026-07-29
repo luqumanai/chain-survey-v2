@@ -98,6 +98,13 @@ header p {
     flex-direction: column;
 }
 
+.right-panel.map-fullscreen {
+    position: fixed;
+    inset: 0;
+    z-index: 9500;
+    background: white;
+}
+
 .main-content.left-hidden {
     grid-template-columns: 1fr;
 }

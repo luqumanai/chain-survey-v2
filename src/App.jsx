@@ -195,7 +195,18 @@ function App() {
             </div>
           </div>
 
-          <div id="mapContainer"></div>
+          <div style={{ position: 'relative' }}>
+            <div id="mapContainer"></div>
+            <button
+              id="mapFullscreenBtn"
+              title="Expand map to full screen"
+              style={{
+                position: 'absolute', top: '10px', right: '10px', zIndex: 1000,
+                background: 'white', border: '2px solid rgba(0,0,0,0.2)', borderRadius: '4px',
+                width: '34px', height: '34px', fontSize: '16px', cursor: 'pointer'
+              }}
+            >⛶</button>
+          </div>
 
           <div className="plot-info">
             <div className="info-grid">
