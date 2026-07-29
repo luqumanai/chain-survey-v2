@@ -248,6 +248,7 @@ export class ChainSurveyConverter {
         
         // Map controls
         document.getElementById('zoomFitBtn').addEventListener('click', () => this.fitToView());
+        document.getElementById('fullExtentBtn').addEventListener('click', () => this.fitToFullExtent());
         document.getElementById('toggleLabelsBtn').addEventListener('click', () => this.toggleLabels());
         document.getElementById('toggleGridBtn').addEventListener('click', () => this.toggleGrid());
         document.getElementById('toggleMapLayerBtn').addEventListener('click', () => this.toggleMapLayerSelector());
@@ -1354,6 +1355,17 @@ export class ChainSurveyConverter {
         this.map.fitBounds(group.getBounds().pad(0.1));
     }
 
+    // Resets the view to the widest default - useful for getting your
+    // bearings again after panning/zooming somewhere confusing, without
+    // depending on where the survey itself is plotted.
+    fitToFullExtent() {
+        if (this.currentMapLayer === 'simple' || !this.currentMapLayer) {
+            this.map.setView([0, 0], 16);
+        } else {
+            this.map.setView([20, 0], 2); // full world view
+        }
+    }
+
     toggleLabels() {
         const labels = document.querySelectorAll('.point-label');
         let hidden = false;
@@ -2165,41 +2177,130 @@ export class ChainSurveyConverter {
         this.showMessage('✓ DXF exported (AutoCAD compatible)!', 'success');
     }
 
+    // Draws the traverse shape as a scaled vector diagram directly onto
+    // the PDF page - not a screenshot, so it stays crisp at any zoom -
+    // with each point numbered to match the coordinate table below it.
+    drawShapeDiagram(doc, boxX, boxY, boxWidth, boxHeight) {
+        doc.setDrawColor(180);
+        doc.setLineWidth(0.3);
+        doc.rect(boxX, boxY, boxWidth, boxHeight);
+
+        if (this.coordinates.length < 2) {
+            doc.setFontSize(10);
+            doc.setTextColor(150);
+            doc.text('No plot data available', boxX + boxWidth / 2, boxY + boxHeight / 2, { align: 'center' });
+            doc.setTextColor(0);
+            return;
+        }
+
+        const xs = this.coordinates.map(c => c.x);
+        const ys = this.coordinates.map(c => c.y);
+        const minX = Math.min(...xs), maxX = Math.max(...xs);
+        const minY = Math.min(...ys), maxY = Math.max(...ys);
+        const shapeWidth = (maxX - minX) || 1;
+        const shapeHeight = (maxY - minY) || 1;
+
+        const padding = 14; // mm, room for point labels near the edges
+        const drawableWidth = boxWidth - padding * 2;
+        const drawableHeight = boxHeight - padding * 2;
+        const scale = Math.min(drawableWidth / shapeWidth, drawableHeight / shapeHeight);
+
+        // Survey Y increases "up"; PDF Y increases downward - flip it.
+        const toPage = (x, y) => [
+            boxX + padding + (x - minX) * scale,
+            boxY + boxHeight - padding - (y - minY) * scale
+        ];
+
+        doc.setDrawColor(74, 105, 189);
+        doc.setLineWidth(0.5);
+        for (let i = 0; i < this.coordinates.length - 1; i++) {
+            const [x1, y1] = toPage(this.coordinates[i].x, this.coordinates[i].y);
+            const [x2, y2] = toPage(this.coordinates[i + 1].x, this.coordinates[i + 1].y);
+            doc.line(x1, y1, x2, y2);
+        }
+
+        this.coordinates.forEach((coord, index) => {
+            const [px, py] = toPage(coord.x, coord.y);
+            doc.setFillColor(255, 107, 107);
+            doc.circle(px, py, 1.3, 'F');
+            doc.setFontSize(8);
+            doc.setTextColor(30);
+            doc.text(String(index), px + 2.2, py - 1.5);
+        });
+        doc.setTextColor(0);
+
+        doc.setFontSize(8);
+        doc.setTextColor(140);
+        doc.text('Diagram is scaled to fit the page - not to a fixed scale', boxX, boxY + boxHeight + 5);
+        doc.setTextColor(0);
+    }
+
     exportPDF() {
+        if (this.coordinates.length === 0) {
+            this.showMessage('No data to export', 'error');
+            return;
+        }
+
         const { jsPDF } = window.jspdf;
         const doc = new jsPDF();
-        
-        doc.setFontSize(16);
+        const projectName = document.getElementById('projectName').value || 'Survey';
+
+        doc.setFontSize(18);
+        doc.setFont(undefined, 'bold');
         doc.text('Chain Survey Report', 20, 20);
-        
-        doc.setFontSize(12);
-        doc.text(`Project: ${document.getElementById('projectName').value}`, 20, 35);
-        doc.text(`Survey No: ${document.getElementById('surveyNumber').value}`, 20, 45);
-        doc.text(`Village: ${document.getElementById('village').value}`, 20, 55);
-        
-        doc.text(`Area: ${this.calculateAreaValue().toFixed(2)} m²`, 20, 70);
-        doc.text(`Perimeter: ${this.calculatePerimeterValue().toFixed(2)} m`, 20, 80);
-        doc.text(`Points: ${this.coordinates.length}`, 20, 90);
-        
-        doc.text('Coordinates:', 20, 105);
-        let y = 115;
+        doc.setFont(undefined, 'normal');
+
+        doc.setFontSize(11);
+        doc.text(`Project: ${projectName}`, 20, 30);
+        doc.text(`Survey No: ${document.getElementById('surveyNumber').value}`, 20, 37);
+        doc.text(`Village: ${document.getElementById('village').value}`, 20, 44);
+
         doc.setFontSize(10);
-        doc.text('Pt    X           Y           Lat        Lng', 20, y);
-        
-        this.coordinates.forEach((coord, index) => {
-            y += 10;
-            if (y > 270) {
-                doc.addPage();
-                y = 20;
-            }
+        doc.text(
+            `Area: ${this.calculateAreaValue().toFixed(2)} m2   |   Perimeter: ${this.calculatePerimeterValue().toFixed(2)} m   |   Points: ${this.coordinates.length}`,
+            20, 54
+        );
+
+        doc.setFontSize(12);
+        doc.setFont(undefined, 'bold');
+        doc.text('Plot Diagram', 20, 66);
+        doc.setFont(undefined, 'normal');
+        this.drawShapeDiagram(doc, 20, 71, 170, 100);
+
+        // Coordinate table on its own page, properly formatted with
+        // borders and a header row instead of hand-spaced plain text.
+        doc.addPage();
+        doc.setFontSize(14);
+        doc.setFont(undefined, 'bold');
+        doc.text('Coordinate Table', 20, 20);
+        doc.setFont(undefined, 'normal');
+
+        const rows = this.coordinates.map((coord, index) => {
+            const traverseItem = this.traverseData[index - 1];
             const pos = this.getExportLatLng(coord);
-            const lat = pos ? pos.lat.toFixed(4) : '-';
-            const lng = pos ? pos.lng.toFixed(4) : '-';
-            doc.text(`${index.toString().padStart(2, ' ')}  ${coord.x.toFixed(3).padStart(9, ' ')}  ${coord.y.toFixed(3).padStart(9, ' ')}  ${lat}  ${lng}`, 20, y);
+            return [
+                index,
+                coord.x.toFixed(3),
+                coord.y.toFixed(3),
+                pos ? pos.lat.toFixed(6) : '-',
+                pos ? pos.lng.toFixed(6) : '-',
+                traverseItem ? traverseItem.distance.toFixed(2) : '-',
+                traverseItem ? traverseItem.bearing.toFixed(2) + ' deg' : '-'
+            ];
         });
-        
-        doc.save('survey_report.pdf');
-        this.showMessage('✓ PDF report exported!', 'success');
+
+        doc.autoTable({
+            startY: 26,
+            head: [['Pt', 'X (m)', 'Y (m)', 'Latitude', 'Longitude', 'Distance (m)', 'Bearing']],
+            body: rows,
+            theme: 'grid',
+            headStyles: { fillColor: [44, 90, 160], textColor: 255, fontStyle: 'bold' },
+            styles: { fontSize: 9, cellPadding: 3 },
+            alternateRowStyles: { fillColor: [245, 247, 250] }
+        });
+
+        doc.save(`${projectName.replace(/[^a-z0-9]/gi, '_')}_report.pdf`);
+        this.showMessage('✓ PDF report exported with diagram!', 'success');
     }
 
     calculateAreaValue() {

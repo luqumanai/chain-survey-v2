@@ -1,15 +1,20 @@
-import { useEffect } from 'react';
+import { useEffect, useState } from 'react';
 import { ChainSurveyConverter } from './legacy-chain-survey.js';
+import About from './About.jsx';
 import './legacy-chain-survey.css';
 
 function App() {
+  const [showAbout, setShowAbout] = useState(false);
+
   useEffect(() => {
     const app = new ChainSurveyConverter();
     window.chainSurvey = app;
   }, []);
 
   return (
-    <div className="container">
+    <>
+      {showAbout && <About onClose={() => setShowAbout(false)} />}
+      <div className="container" style={{ display: showAbout ? 'none' : 'block' }}>
       <header>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
           <div>
@@ -17,15 +22,15 @@ function App() {
             <p>Convert historical chain survey records to modern GIS formats</p>
           </div>
           <div>
-            <a
-              href="about.html"
+            <button
+              onClick={() => setShowAbout(true)}
               style={{
                 color: 'white', textDecoration: 'none', background: 'rgba(255,255,255,0.2)',
-                padding: '10px 20px', borderRadius: '5px', fontWeight: 600
+                padding: '10px 20px', borderRadius: '5px', fontWeight: 600, border: 'none', cursor: 'pointer', fontSize: '14px'
               }}
             >
               ℹ️ About
-            </a>
+            </button>
           </div>
         </div>
       </header>
@@ -176,6 +181,7 @@ function App() {
             </div>
             <div className="control-buttons">
               <button id="zoomFitBtn">🔍 Fit to View</button>
+              <button id="fullExtentBtn">🌐 Full Extent</button>
               <button id="toggleLabelsBtn">🏷️ Labels</button>
               <button id="toggleGridBtn">⊞ Grid</button>
               <button id="toggleMapLayerBtn">🗺️ Layers</button>
@@ -313,6 +319,7 @@ function App() {
       {/* Footer Credit */}
       <div className="footer-credit">👤 Prepared by LH</div>
     </div>
+    </>
   );
 }
 

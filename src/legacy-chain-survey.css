@@ -794,6 +794,26 @@ th {
     .plot-info {
         grid-template-columns: repeat(2, 1fr);
     }
+
+    /* On desktop the map fills whatever space is left in the grid
+       column automatically. Once the layout stacks into one column on
+       mobile, there's no longer a fixed-height parent for it to fill,
+       so without an explicit minimum it can collapse to almost nothing. */
+    #mapContainer {
+        min-height: 320px;
+    }
+
+    /* Both tables can have more columns than a phone screen is wide -
+       scroll sideways instead of squashing everything unreadably. */
+    .table-container, #coordinatesDisplay {
+        overflow-x: auto;
+    }
+
+    /* The account/role bar is fixed to the top-right corner - give the
+       header some breathing room so it doesn't sit on top of the title. */
+    header {
+        padding-top: 44px;
+    }
 }
 
 @media (max-width: 600px) {
@@ -822,6 +842,25 @@ th {
     .plot-info {
         grid-template-columns: 1fr;
     }
+
+    #mapContainer {
+        min-height: 260px;
+    }
+
+    /* Bigger tap targets - the desktop sizing is comfortable for a
+       mouse but easy to mis-tap on a touchscreen. */
+    button {
+        padding: 11px 14px;
+        font-size: 14px;
+    }
+
+    .control-buttons button {
+        padding: 10px 8px;
+        min-width: 70px;
+    }
+
+    .bearing-deg, .bearing-deg-q { width: 30px; font-size: 14px; }
+    .bearing-min, .bearing-sec, .bearing-min-q { width: 24px; font-size: 14px; }
 }
 
 hr {
