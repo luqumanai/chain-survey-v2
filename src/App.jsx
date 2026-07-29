@@ -195,7 +195,7 @@ function App() {
             </div>
           </div>
 
-          <div style={{ position: 'relative' }}>
+          <div className="map-wrapper" style={{ position: 'relative', flex: 1 }}>
             <div id="mapContainer"></div>
             <button
               id="mapFullscreenBtn"
@@ -203,9 +203,9 @@ function App() {
               style={{
                 position: 'absolute', top: '10px', right: '10px', zIndex: 1000,
                 background: 'white', border: '2px solid rgba(0,0,0,0.2)', borderRadius: '4px',
-                width: '34px', height: '34px', fontSize: '16px', cursor: 'pointer'
+                padding: '6px 12px', fontSize: '12px', fontWeight: 600, cursor: 'pointer', color: '#333'
               }}
-            >⛶</button>
+            >Expand</button>
           </div>
 
           <div className="plot-info">

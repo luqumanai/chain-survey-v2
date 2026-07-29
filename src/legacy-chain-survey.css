@@ -443,10 +443,10 @@ th {
 }
 
 #mapContainer {
-    flex: 1;
+    position: absolute;
+    inset: 0;
     border: none;
     background: #f0f0f0;
-    position: relative;
 }
 
 .plot-info {
@@ -806,7 +806,7 @@ th {
        column automatically. Once the layout stacks into one column on
        mobile, there's no longer a fixed-height parent for it to fill,
        so without an explicit minimum it can collapse to almost nothing. */
-    #mapContainer {
+    .map-wrapper {
         min-height: 320px;
     }
 
@@ -850,7 +850,7 @@ th {
         grid-template-columns: 1fr;
     }
 
-    #mapContainer {
+    .map-wrapper {
         min-height: 260px;
     }
 

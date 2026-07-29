@@ -1364,7 +1364,7 @@ export class ChainSurveyConverter {
         rightPanel.classList.toggle('map-fullscreen');
 
         const isFullscreen = rightPanel.classList.contains('map-fullscreen');
-        btn.textContent = isFullscreen ? '×' : '⛶';
+        btn.textContent = isFullscreen ? 'Collapse' : 'Expand';
         btn.title = isFullscreen ? 'Exit full screen' : 'Expand map to full screen';
 
         // The panel just changed size - Leaflet needs a moment to notice.
