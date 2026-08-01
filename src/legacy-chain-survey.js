@@ -138,6 +138,26 @@ export class ChainSurveyConverter {
             minZoom: isSimple ? -15 : 2,
             zoomSnap: 0.25
         });
+
+        L.control.scale({ position: 'bottomleft', metric: true, imperial: false }).addTo(this.map);
+
+        const coordControl = L.control({ position: 'bottomleft' });
+        coordControl.onAdd = () => {
+            const div = L.DomUtil.create('div', 'mouse-coord-display');
+            div.textContent = isSimple ? 'X: -   Y: -' : 'Lat: -   Lon: -';
+            return div;
+        };
+        coordControl.addTo(this.map);
+
+        this.map.on('mousemove', (e) => {
+            const el = document.querySelector('.mouse-coord-display');
+            if (!el) return;
+            // Our own local convention (matching how plotShape draws
+            // points): coord.x maps to lat, coord.y maps to lng.
+            el.textContent = isSimple
+                ? `X: ${e.latlng.lat.toFixed(2)}   Y: ${e.latlng.lng.toFixed(2)}`
+                : `Lat: ${e.latlng.lat.toFixed(6)}   Lon: ${e.latlng.lng.toFixed(6)}`;
+        });
     }
 
     attachMapClickHandler() {
@@ -1139,14 +1159,14 @@ export class ChainSurveyConverter {
         const leafletCoords = positions;
         
         const polyline = L.polyline(leafletCoords, {
-            color: '#4a69bd',
+            color: '#1a3d7c',
             weight: 3,
-            opacity: 0.8
+            opacity: 0.85
         }).addTo(this.plotLayer);
         
         if (this.coordinates.length > 2) {
             const polygon = L.polygon(leafletCoords, {
-                color: '#4a69bd',
+                color: '#1a3d7c',
                 fillColor: '#4a69bd',
                 fillOpacity: 0.2,
                 weight: 2
@@ -1158,14 +1178,19 @@ export class ChainSurveyConverter {
 
             const marker = L.circleMarker(pos, {
                 radius: 6,
-                fillColor: '#ff6b6b',
-                color: '#fff',
-                weight: 2,
-                fillOpacity: 0.8
+                fillColor: '#ffffff',
+                color: '#1a3d7c',
+                weight: 2.5,
+                fillOpacity: 1
             }).addTo(this.plotLayer);
             
             marker.bindPopup(`<strong>Point ${index}</strong><br>X: ${coord.x.toFixed(3)}<br>Y: ${coord.y.toFixed(3)}`);
             
+            // Hover highlight - a point brightens to yellow under the
+            // cursor, so it's obvious which one you're about to click.
+            marker.on('mouseover', () => marker.setStyle({ fillColor: '#ffd54f', color: '#c9a227' }));
+            marker.on('mouseout', () => marker.setStyle({ fillColor: '#ffffff', color: '#1a3d7c' }));
+
             // Double-click event for editing
             marker.on('dblclick', () => {
                 this.editCoordinates(index);
@@ -1381,15 +1406,30 @@ export class ChainSurveyConverter {
         this.map.fitBounds(group.getBounds().pad(0.1));
     }
 
-    // Resets the view to the widest default - useful for getting your
-    // bearings again after panning/zooming somewhere confusing, without
-    // depending on where the survey itself is plotted.
+    // Fits the view to everything currently on the map - the plotted
+    // survey, plus the reference grid if it's showing - with headroom
+    // around the edges. (GCPs and imported reference layers aren't
+    // drawn as separate map objects yet, so they can't be included in
+    // this bounds calculation until that exists - noted honestly rather
+    // than silently pretending to include them.)
     fitToFullExtent() {
-        if (this.currentMapLayer === 'simple' || !this.currentMapLayer) {
-            this.map.setView([0, 0], 16);
-        } else {
-            this.map.setView([20, 0], 2); // full world view
+        const layers = [...this.plotLayer.getLayers()];
+        if (this.gridLayer && this.map.hasLayer(this.gridLayer)) {
+            layers.push(...this.gridLayer.getLayers());
         }
+
+        if (layers.length === 0) {
+            // Nothing plotted yet - fall back to a sensible default view.
+            if (this.currentMapLayer === 'simple' || !this.currentMapLayer) {
+                this.map.setView([0, 0], 16);
+            } else {
+                this.map.setView([20, 0], 2);
+            }
+            return;
+        }
+
+        const group = new L.featureGroup(layers);
+        this.map.fitBounds(group.getBounds().pad(0.1));
     }
 
     toggleLabels() {
@@ -2365,15 +2405,29 @@ export class ChainSurveyConverter {
     }
 
     showMessage(message, type) {
-        const messageDiv = document.createElement('div');
-        messageDiv.className = `message ${type}`;
-        messageDiv.textContent = message;
-        document.body.appendChild(messageDiv);
-        
+        let container = document.getElementById('toastContainer');
+        if (!container) {
+            container = document.createElement('div');
+            container.id = 'toastContainer';
+            container.className = 'toast-container';
+            document.body.appendChild(container);
+        }
+
+        const icons = { success: '✓', error: '⚠' };
+        const toast = document.createElement('div');
+        toast.className = `toast ${type}`;
+        toast.innerHTML = `<span class="toast-icon">${icons[type] || 'i'}</span><span>${message}</span>`;
+        container.appendChild(toast);
+
+        // Triggering the "in" animation on the next frame (rather than
+        // immediately) is what makes the CSS transition actually play -
+        // adding the class in the same instant the element is created
+        // would skip straight to its end state with no visible motion.
+        requestAnimationFrame(() => toast.classList.add('toast-visible'));
+
         setTimeout(() => {
-            if (messageDiv.parentNode) {
-                messageDiv.parentNode.removeChild(messageDiv);
-            }
+            toast.classList.remove('toast-visible');
+            toast.addEventListener('transitionend', () => toast.remove(), { once: true });
         }, 4000);
     }
 }
