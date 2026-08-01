@@ -39,6 +39,19 @@ export class ChainSurveyConverter {
             proj4.defs('EPSG:32643', '+proj=utm +zone=43 +datum=WGS84 +units=m +no_defs');
         }
         this.initMap();
+
+        // Leaflet caches its container size the instant it's created -
+        // but React can finish this code before the browser has actually
+        // finished laying out the flex/grid structure around the map,
+        // so Leaflet can end up believing its size is 0. Double
+        // requestAnimationFrame is the standard, reliable way to wait
+        // until at least one full layout+paint cycle has genuinely
+        // happened before checking again.
+        requestAnimationFrame(() => {
+            requestAnimationFrame(() => this.map.invalidateSize());
+        });
+        window.addEventListener('load', () => this.map.invalidateSize());
+
         this.bindEvents();
         this.addInitialRow();
         this.updateDistancePlaceholders();
@@ -270,30 +283,44 @@ export class ChainSurveyConverter {
         this.gridLayer = gridLayer;
     }
 
+    // Binds a click/change/etc. handler only if the element actually
+    // exists. A single missing button (e.g. from a file that didn't get
+    // fully updated) used to be able to silently break every binding
+    // that came after it in the list - this stops that from happening
+    // again, and leaves a note in the console pointing at exactly which
+    // element was missing.
+    safeBind(id, event, handler) {
+        const el = document.getElementById(id);
+        if (el) {
+            el.addEventListener(event, handler);
+        } else {
+            console.warn(`[ChainSurvey] #${id} not found - skipping this binding. If a feature seems missing, check that all recent files were replaced.`);
+        }
+        return el;
+    }
+
     bindEvents() {
         // Traverse leg events
-        document.getElementById('addLegBtn').addEventListener('click', () => this.addLeg());
-        document.getElementById('calculateBtn').addEventListener('click', () => this.calculatePlot());
-        document.getElementById('adjustClosureBtn').addEventListener('click', () => this.adjustClosure());
+        this.safeBind('addLegBtn', 'click', () => this.addLeg());
+        this.safeBind('calculateBtn', 'click', () => this.calculatePlot());
+        this.safeBind('adjustClosureBtn', 'click', () => this.adjustClosure());
         
         // Map controls
-        document.getElementById('zoomFitBtn').addEventListener('click', () => this.fitToView());
-        document.getElementById('fullExtentBtn').addEventListener('click', () => this.fitToFullExtent());
-        document.getElementById('mapFullscreenBtn').addEventListener('click', () => this.toggleMapFullscreen());
-        document.getElementById('toggleLabelsBtn').addEventListener('click', () => this.toggleLabels());
-        document.getElementById('toggleGridBtn').addEventListener('click', () => this.toggleGrid());
-        document.getElementById('toggleMapLayerBtn').addEventListener('click', () => this.toggleMapLayerSelector());
-        document.getElementById('getCurrentLocation').addEventListener('click', () => this.getCurrentLocation());
-        document.getElementById('editPointBtn').addEventListener('click', () => this.toggleEditPointMode());
+        this.safeBind('zoomFitBtn', 'click', () => this.fitToView());
+        this.safeBind('fullExtentBtn', 'click', () => this.fitToFullExtent());
+        this.safeBind('mapFullscreenBtn', 'click', () => this.toggleMapFullscreen());
+        this.safeBind('toggleLabelsBtn', 'click', () => this.toggleLabels());
+        this.safeBind('toggleGridBtn', 'click', () => this.toggleGrid());
+        this.safeBind('toggleMapLayerBtn', 'click', () => this.toggleMapLayerSelector());
+        this.safeBind('getCurrentLocation', 'click', () => this.getCurrentLocation());
+        this.safeBind('editPointBtn', 'click', () => this.toggleEditPointMode());
 
         // Panel hide/show
-        document.getElementById('hideLeftPanelBtn').addEventListener('click', () => this.toggleLeftPanel());
-        document.getElementById('showLeftPanelBtn').addEventListener('click', () => this.toggleLeftPanel());
-        document.getElementById('hideBottomPanelBtn').addEventListener('click', () => this.toggleBottomPanel());
-        const leftAutoHideBtn = document.getElementById('leftAutoHideToggle');
-        if (leftAutoHideBtn) leftAutoHideBtn.addEventListener('click', () => this.toggleLeftPanelAutoHideMode());
-        const bottomAutoHideBtn = document.getElementById('bottomAutoHideToggle');
-        if (bottomAutoHideBtn) bottomAutoHideBtn.addEventListener('click', () => this.toggleBottomPanelAutoHideMode());
+        this.safeBind('hideLeftPanelBtn', 'click', () => this.toggleLeftPanel());
+        this.safeBind('showLeftPanelBtn', 'click', () => this.toggleLeftPanel());
+        this.safeBind('hideBottomPanelBtn', 'click', () => this.toggleBottomPanel());
+        this.safeBind('leftAutoHideToggle', 'click', () => this.toggleLeftPanelAutoHideMode());
+        this.safeBind('bottomAutoHideToggle', 'click', () => this.toggleBottomPanelAutoHideMode());
 
         // Map layer switching
         document.querySelectorAll('input[name="mapType"]').forEach(radio => {
@@ -301,66 +328,71 @@ export class ChainSurveyConverter {
         });
 
         // Export events
-        document.getElementById('exportCSV').addEventListener('click', () => this.exportCSV());
-        document.getElementById('exportGeoJSON').addEventListener('click', () => this.exportGeoJSON());
-        document.getElementById('exportKML').addEventListener('click', () => this.exportKML());
-        document.getElementById('exportSHP').addEventListener('click', () => this.exportShapefile());
-        document.getElementById('exportDXF').addEventListener('click', () => this.exportDXF());
-        document.getElementById('exportPDF').addEventListener('click', () => this.exportPDF());
+        this.safeBind('exportCSV', 'click', () => this.exportCSV());
+        this.safeBind('exportGeoJSON', 'click', () => this.exportGeoJSON());
+        this.safeBind('exportKML', 'click', () => this.exportKML());
+        this.safeBind('exportSHP', 'click', () => this.exportShapefile());
+        this.safeBind('exportDXF', 'click', () => this.exportDXF());
+        this.safeBind('exportPDF', 'click', () => this.exportPDF());
 
         // Save/Load events
-        document.getElementById('saveProjectBtn').addEventListener('click', () => this.saveProject());
-        document.getElementById('loadProjectBtn').addEventListener('click', () => this.loadProject());
-        document.getElementById('listProjectsBtn').addEventListener('click', () => this.listProjects());
-        document.getElementById('shareProjectBtn').addEventListener('click', () => this.shareProject());
-        document.getElementById('projectSelect').addEventListener('change', (e) => this.selectProjectToLoad(e.target.value));
+        this.safeBind('saveProjectBtn', 'click', () => this.saveProject());
+        this.safeBind('loadProjectBtn', 'click', () => this.loadProject());
+        this.safeBind('listProjectsBtn', 'click', () => this.listProjects());
+        this.safeBind('shareProjectBtn', 'click', () => this.shareProject());
+        this.safeBind('projectSelect', 'change', (e) => this.selectProjectToLoad(e.target.value));
 
         // Import/Export events
-        document.getElementById('importFile').addEventListener('change', (e) => this.handleFileImport(e));
-        document.getElementById('importBtn').addEventListener('click', () => this.importData());
-        document.getElementById('downloadTemplateBtn').addEventListener('click', () => this.downloadTemplate());
+        this.safeBind('importFile', 'change', (e) => this.handleFileImport(e));
+        this.safeBind('importBtn', 'click', () => this.importData());
+        this.safeBind('downloadTemplateBtn', 'click', () => this.downloadTemplate());
 
         // Georeference events
-        document.getElementById('addGCPBtn').addEventListener('click', () => this.addGCP());
-        document.getElementById('mapClickGCPBtn').addEventListener('click', () => this.toggleGCPClickMode());
-        document.getElementById('calculateGeoreferenceBtn').addEventListener('click', () => this.calculateGeoreference());
+        this.safeBind('addGCPBtn', 'click', () => this.addGCP());
+        this.safeBind('mapClickGCPBtn', 'click', () => this.toggleGCPClickMode());
+        this.safeBind('calculateGeoreferenceBtn', 'click', () => this.calculateGeoreference());
 
         // Modal events - Edit Traverse
         const editModal = document.getElementById('editModal');
-        const editClose = editModal.querySelector('.close');
-        editClose.onclick = () => { editModal.style.display = 'none'; };
-        
-        document.getElementById('saveEdit').addEventListener('click', () => this.saveEdit());
-        document.getElementById('cancelEdit').addEventListener('click', () => this.cancelEdit());
+        if (editModal) {
+            const editClose = editModal.querySelector('.close');
+            if (editClose) editClose.onclick = () => { editModal.style.display = 'none'; };
+        }
+        this.safeBind('saveEdit', 'click', () => this.saveEdit());
+        this.safeBind('cancelEdit', 'click', () => this.cancelEdit());
 
         // Modal events - Edit Georeference
         const georefModal = document.getElementById('georefModal');
-        const georefClose = georefModal.querySelector('.close');
-        georefClose.onclick = () => { georefModal.style.display = 'none'; };
-        
-        document.getElementById('saveGeorefEdit').addEventListener('click', () => this.saveGeorefEdit());
-        document.getElementById('cancelGeorefEdit').addEventListener('click', () => { georefModal.style.display = 'none'; });
+        if (georefModal) {
+            const georefClose = georefModal.querySelector('.close');
+            if (georefClose) georefClose.onclick = () => { georefModal.style.display = 'none'; };
+        }
+        this.safeBind('saveGeorefEdit', 'click', () => this.saveGeorefEdit());
+        this.safeBind('cancelGeorefEdit', 'click', () => { if (georefModal) georefModal.style.display = 'none'; });
 
         // Modal events - GCP Click
         const gcpClickModal = document.getElementById('gcpClickModal');
-        const gcpClickClose = gcpClickModal.querySelector('.close');
-        gcpClickClose.onclick = () => { 
-            gcpClickModal.style.display = 'none';
-            this.gcpClickMode = false;
-            this.gcpClickCount = 0;
-        };
-        
-        document.getElementById('saveGCPClick').addEventListener('click', () => this.saveGCPClick());
-        document.getElementById('cancelGCPClick').addEventListener('click', () => {
-            gcpClickModal.style.display = 'none';
+        if (gcpClickModal) {
+            const gcpClickClose = gcpClickModal.querySelector('.close');
+            if (gcpClickClose) {
+                gcpClickClose.onclick = () => {
+                    gcpClickModal.style.display = 'none';
+                    this.gcpClickMode = false;
+                    this.gcpClickCount = 0;
+                };
+            }
+        }
+        this.safeBind('saveGCPClick', 'click', () => this.saveGCPClick());
+        this.safeBind('cancelGCPClick', 'click', () => {
+            if (gcpClickModal) gcpClickModal.style.display = 'none';
             this.gcpClickMode = false;
             this.gcpClickCount = 0;
         });
 
         // CRS change event
-        document.getElementById('crsSelect').addEventListener('change', (e) => {
+        this.safeBind('crsSelect', 'change', (e) => {
             const customDiv = document.getElementById('customCRS');
-            customDiv.style.display = e.target.value === 'custom' ? 'block' : 'none';
+            if (customDiv) customDiv.style.display = e.target.value === 'custom' ? 'block' : 'none';
 
             // Any imported anchor points, and any UTM-derived positions,
             // depend on which coordinate system is selected - recompute
@@ -430,13 +462,13 @@ export class ChainSurveyConverter {
 
         // Switching Bearing Format rebuilds every row's bearing cell to
         // match, carrying over each row's existing value.
-        document.getElementById('bearingFormat').addEventListener('change', () => {
+        this.safeBind('bearingFormat', 'change', () => {
             this.rebuildAllBearingCells();
         });
 
         // Switching Distance Unit updates the example placeholder shown
         // in every distance box, so it's clear which unit is expected.
-        document.getElementById('distanceUnit').addEventListener('change', () => {
+        this.safeBind('distanceUnit', 'change', () => {
             this.updateDistancePlaceholders();
         });
     }
@@ -467,14 +499,21 @@ export class ChainSurveyConverter {
         const enabled = leftPanel.classList.toggle('auto-hide-mode');
         mainContent.classList.toggle('auto-hide-active', enabled);
         leftPanel.classList.remove('auto-visible', 'hidden');
-        document.getElementById('showLeftPanelBtn').style.display = 'none';
-        document.getElementById('hideLeftPanelBtn').style.display = 'block';
+        const showBtn = document.getElementById('showLeftPanelBtn');
+        const hideBtn = document.getElementById('hideLeftPanelBtn');
+        if (showBtn) showBtn.style.display = 'none';
+        if (hideBtn) hideBtn.style.display = 'block';
 
         if (enabled && !this._leftAutoHideBound) {
             this.setupLeftPanelAutoHide();
             this._leftAutoHideBound = true;
         }
 
+        // Belt-and-suspenders: resize once immediately, and again exactly
+        // when the slide animation actually finishes (more reliable than
+        // guessing a fixed delay).
+        this.map.invalidateSize();
+        leftPanel.addEventListener('transitionend', () => this.map.invalidateSize(), { once: true });
         setTimeout(() => this.map.invalidateSize(), 420);
     }
 

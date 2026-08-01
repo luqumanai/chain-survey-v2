@@ -33,6 +33,10 @@ function App() {
             </button>
           </div>
         </div>
+        <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '8px', marginTop: '8px' }}>
+          <button className="auto-hide-toggle" id="leftAutoHideToggle" title="Toggle left panel auto-hide (desktop only - reveals on hovering the left edge)">🖱️ Left Auto-hide</button>
+          <button className="auto-hide-toggle" id="bottomAutoHideToggle" title="Toggle bottom panel auto-hide (desktop only - reveals on hovering the bottom edge)">🖱️ Bottom Auto-hide</button>
+        </div>
       </header>
 
       <div className="main-content">
@@ -41,7 +45,6 @@ function App() {
           <div className="panel-header">
             <h3>📝 Data Entry</h3>
             <button className="hide-panel-btn" id="hideLeftPanelBtn" title="Hide Panel">◄</button>
-            <button className="auto-hide-toggle" id="leftAutoHideToggle" title="Toggle auto-hide (desktop only - reveals on hovering the left edge)">🖱️ Auto-hide</button>
           </div>
 
           <div className="project-info">
@@ -224,7 +227,6 @@ function App() {
       <div className="bottom-panel" id="bottomPanel">
         <div className="panel-toggle">
           <button className="hide-panel-btn" id="hideBottomPanelBtn" title="Hide Panel">▼</button>
-          <button className="auto-hide-toggle" id="bottomAutoHideToggle" title="Toggle auto-hide (desktop only - reveals on hovering the bottom edge)">🖱️ Auto-hide</button>
         </div>
 
         <div className="export-section">
