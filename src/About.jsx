@@ -139,7 +139,7 @@ function About({ onClose }) {
         </Section>
 
         <div style={styles.credit}>
-          <p style={styles.creditName}>Prepared by Luqumanul Hakeem</p>
+          <p style={styles.creditName}>Prepared by Fathima</p>
           <p style={styles.creditRole}>GIS Expert</p>
           <p style={styles.creditContact}>+91 9014834863</p>
           <p style={styles.creditContact}>luquman75@gmail.com</p>
