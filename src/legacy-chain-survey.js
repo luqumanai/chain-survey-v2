@@ -290,8 +290,10 @@ export class ChainSurveyConverter {
         document.getElementById('hideLeftPanelBtn').addEventListener('click', () => this.toggleLeftPanel());
         document.getElementById('showLeftPanelBtn').addEventListener('click', () => this.toggleLeftPanel());
         document.getElementById('hideBottomPanelBtn').addEventListener('click', () => this.toggleBottomPanel());
-        document.getElementById('leftAutoHideToggle').addEventListener('click', () => this.toggleLeftPanelAutoHideMode());
-        document.getElementById('bottomAutoHideToggle').addEventListener('click', () => this.toggleBottomPanelAutoHideMode());
+        const leftAutoHideBtn = document.getElementById('leftAutoHideToggle');
+        if (leftAutoHideBtn) leftAutoHideBtn.addEventListener('click', () => this.toggleLeftPanelAutoHideMode());
+        const bottomAutoHideBtn = document.getElementById('bottomAutoHideToggle');
+        if (bottomAutoHideBtn) bottomAutoHideBtn.addEventListener('click', () => this.toggleBottomPanelAutoHideMode());
 
         // Map layer switching
         document.querySelectorAll('input[name="mapType"]').forEach(radio => {
