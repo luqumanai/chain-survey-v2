@@ -290,6 +290,8 @@ export class ChainSurveyConverter {
         document.getElementById('hideLeftPanelBtn').addEventListener('click', () => this.toggleLeftPanel());
         document.getElementById('showLeftPanelBtn').addEventListener('click', () => this.toggleLeftPanel());
         document.getElementById('hideBottomPanelBtn').addEventListener('click', () => this.toggleBottomPanel());
+        document.getElementById('leftAutoHideToggle').addEventListener('click', () => this.toggleLeftPanelAutoHideMode());
+        document.getElementById('bottomAutoHideToggle').addEventListener('click', () => this.toggleBottomPanelAutoHideMode());
 
         // Map layer switching
         document.querySelectorAll('input[name="mapType"]').forEach(radio => {
@@ -449,6 +451,95 @@ export class ChainSurveyConverter {
         document.querySelectorAll('.distance-input').forEach(input => {
             input.placeholder = `${example} (${unit})`;
         });
+    }
+
+    // Auto-hide mode (opt-in, off by default): the left panel becomes an
+    // overlay drawer that slides in when the mouse touches the screen's
+    // left edge, and slides away again once the mouse leaves it - VS
+    // Code's sidebar behavior. Off by default because hover has no
+    // equivalent on a touchscreen - this only helps on desktop, and the
+    // manual show/hide buttons keep working normally either way.
+    toggleLeftPanelAutoHideMode() {
+        const leftPanel = document.getElementById('leftPanel');
+        const mainContent = document.querySelector('.main-content');
+        const enabled = leftPanel.classList.toggle('auto-hide-mode');
+        mainContent.classList.toggle('auto-hide-active', enabled);
+        leftPanel.classList.remove('auto-visible', 'hidden');
+        document.getElementById('showLeftPanelBtn').style.display = 'none';
+        document.getElementById('hideLeftPanelBtn').style.display = 'block';
+
+        if (enabled && !this._leftAutoHideBound) {
+            this.setupLeftPanelAutoHide();
+            this._leftAutoHideBound = true;
+        }
+
+        setTimeout(() => this.map.invalidateSize(), 420);
+    }
+
+    setupLeftPanelAutoHide() {
+        let trigger = document.getElementById('leftEdgeTrigger');
+        if (!trigger) {
+            trigger = document.createElement('div');
+            trigger.id = 'leftEdgeTrigger';
+            trigger.className = 'edge-trigger edge-trigger-left';
+            document.body.appendChild(trigger);
+        }
+
+        const leftPanel = document.getElementById('leftPanel');
+        let hideTimer = null;
+
+        const reveal = () => {
+            clearTimeout(hideTimer);
+            leftPanel.classList.add('auto-visible');
+        };
+        const scheduleHide = () => {
+            hideTimer = setTimeout(() => leftPanel.classList.remove('auto-visible'), 300);
+        };
+
+        trigger.addEventListener('mouseenter', reveal);
+        leftPanel.addEventListener('mouseenter', reveal);
+        leftPanel.addEventListener('mouseleave', scheduleHide);
+    }
+
+    // Same idea for the bottom panel - reveals when the mouse nears the
+    // bottom edge of the screen, hides again once it moves away.
+    toggleBottomPanelAutoHideMode() {
+        const bottomPanel = document.getElementById('bottomPanel');
+        const enabled = bottomPanel.classList.toggle('auto-hide-mode');
+        bottomPanel.classList.remove('auto-visible', 'hidden');
+        document.getElementById('hideBottomPanelBtn').textContent = '▼';
+
+        if (enabled && !this._bottomAutoHideBound) {
+            this.setupBottomPanelAutoHide();
+            this._bottomAutoHideBound = true;
+        }
+
+        setTimeout(() => this.map.invalidateSize(), 420);
+    }
+
+    setupBottomPanelAutoHide() {
+        let trigger = document.getElementById('bottomEdgeTrigger');
+        if (!trigger) {
+            trigger = document.createElement('div');
+            trigger.id = 'bottomEdgeTrigger';
+            trigger.className = 'edge-trigger edge-trigger-bottom';
+            document.body.appendChild(trigger);
+        }
+
+        const bottomPanel = document.getElementById('bottomPanel');
+        let hideTimer = null;
+
+        const reveal = () => {
+            clearTimeout(hideTimer);
+            bottomPanel.classList.add('auto-visible');
+        };
+        const scheduleHide = () => {
+            hideTimer = setTimeout(() => bottomPanel.classList.remove('auto-visible'), 300);
+        };
+
+        trigger.addEventListener('mouseenter', reveal);
+        bottomPanel.addEventListener('mouseenter', reveal);
+        bottomPanel.addEventListener('mouseleave', scheduleHide);
     }
 
     toggleLeftPanel() {

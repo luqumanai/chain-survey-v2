@@ -41,6 +41,7 @@ function App() {
           <div className="panel-header">
             <h3>📝 Data Entry</h3>
             <button className="hide-panel-btn" id="hideLeftPanelBtn" title="Hide Panel">◄</button>
+            <button className="auto-hide-toggle" id="leftAutoHideToggle" title="Toggle auto-hide (desktop only - reveals on hovering the left edge)">🖱️ Auto-hide</button>
           </div>
 
           <div className="project-info">
@@ -223,6 +224,7 @@ function App() {
       <div className="bottom-panel" id="bottomPanel">
         <div className="panel-toggle">
           <button className="hide-panel-btn" id="hideBottomPanelBtn" title="Hide Panel">▼</button>
+          <button className="auto-hide-toggle" id="bottomAutoHideToggle" title="Toggle auto-hide (desktop only - reveals on hovering the bottom edge)">🖱️ Auto-hide</button>
         </div>
 
         <div className="export-section">

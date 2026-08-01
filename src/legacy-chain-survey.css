@@ -676,6 +676,74 @@ th {
 }
 
 /* Footer Credit */
+/* Auto-hide mode (opt-in) - left panel becomes a sliding overlay drawer */
+.left-panel.auto-hide-mode {
+    position: fixed;
+    top: 0;
+    left: 0;
+    height: 100vh;
+    max-height: 100vh;
+    z-index: 8000;
+    box-shadow: 6px 0 24px rgba(0,0,0,0.2);
+    transform: translateX(-100%);
+    transition: transform 400ms cubic-bezier(.4,0,.2,1);
+}
+
+.left-panel.auto-hide-mode.auto-visible {
+    transform: translateX(0);
+}
+
+.main-content.auto-hide-active {
+    grid-template-columns: 1fr;
+}
+
+/* Auto-hide mode (opt-in) - bottom panel slides up from off-screen */
+.bottom-panel.auto-hide-mode {
+    position: fixed;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    z-index: 8000;
+    box-shadow: 0 -6px 24px rgba(0,0,0,0.2);
+    transform: translateY(100%);
+    transition: transform 400ms cubic-bezier(.4,0,.2,1);
+}
+
+.bottom-panel.auto-hide-mode.auto-visible {
+    transform: translateY(0);
+}
+
+/* Invisible strips at the screen edge that reveal the drawer on hover -
+   desktop only, since touch devices have no hover state to trigger this */
+.edge-trigger {
+    position: fixed;
+    z-index: 7999;
+}
+
+.edge-trigger-left {
+    top: 0;
+    left: 0;
+    width: 10px;
+    height: 100vh;
+}
+
+.edge-trigger-bottom {
+    bottom: 0;
+    left: 0;
+    right: 0;
+    height: 10px;
+}
+
+.auto-hide-toggle {
+    background: #6c757d;
+    font-size: 11px;
+    padding: 5px 8px;
+}
+
+.auto-hide-toggle:hover {
+    background: #545b62;
+}
+
 .footer-credit {
     position: fixed;
     bottom: 20px;
